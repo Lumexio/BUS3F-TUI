@@ -23,7 +23,7 @@ You are a software development task router. Your ONLY job is to classify the use
 Output format (strict — no other text):
 {"engine": "<ENGINE>", "task": "<TASK>"}
 
-ENGINE must be exactly one of: coder, reviewer, debugger, general, godot, unity
+ENGINE must be exactly one of: coder, reviewer, debugger, general
 TASK must be exactly one of: edit, review, explain, debug, scaffold
 
 Classification rules:
@@ -31,8 +31,6 @@ Classification rules:
 - engine=reviewer : code audits, reviews, checking compliance, style, or syntax
 - engine=debugger : errors, crash logs, stack traces, failure diagnosis
 - engine=general  : general questions, explanations, architecture, or ambiguous queries
-- engine=godot    : explicitly targets Godot engine or GDScript
-- engine=unity    : explicitly targets Unity engine or C# MonoBehaviour
 - task=edit       : fix, change, update, rewrite, refactor, modify, implement
 - task=review     : check, review, audit, validate, inspect, lint
 - task=explain    : explain, how does, what is, describe, walk me through
@@ -42,26 +40,14 @@ Output ONLY the JSON. No markdown. No explanation.
 """
 
 # Pre-filter patterns (deterministic, no model call needed)
-GODOT_KEYWORDS = re.compile(
-    r'\b(gdscript|\.gd\b|\.tscn\b|godot|kinematicbody|export var|onready|yield\(|get_node)',
-    re.IGNORECASE
-)
-UNITY_KEYWORDS = re.compile(
-    r'\b(monobehaviour|gameobject|\.cs\b|\.unity\b|unity|inspector|serializedfield|start\(\)|update\(\))',
-    re.IGNORECASE
-)
-ASSET_KEYWORDS = re.compile(
-    r'\b(texture|sprite|import setting|atlas|compression|mipmap|\.png\b|\.jpg\b|\.wav\b|\.meta\b|\.import\b)',
-    re.IGNORECASE
-)
 BUILD_KEYWORDS = re.compile(
-    r'\b(build error|compile error|error log|linker|missing reference|parse error|cs\d{4})',
+    r'\b(build error|compile error|error log|linker|missing reference|parse error|traceback|panic|syntaxerror|typeerror)\b',
     re.IGNORECASE
 )
 
 EDIT_KEYWORDS = re.compile(r'\b(fix|change|rewrite|refactor|modify|correct|repair)\b|\bupdate\b(?!\s*\()', re.IGNORECASE)
 DEBUG_KEYWORDS = re.compile(
-    r'\b(not working|broken|error|crash|fail|bug|why is|doesn\'t work|not moving|doesn\'t move)\b',
+    r'\b(not working|broken|error|crash|fail|bug|why is|doesn\'t work|failing test|segfault)\b',
     re.IGNORECASE
 )
 SCAFFOLD_KEYWORDS = re.compile(r'\b(create|generate|new|scaffold|make me|write from scratch|template)\b', re.IGNORECASE)
@@ -76,13 +62,7 @@ def _prefilter_route(text: str) -> dict[str, str] | None:
     Default: return None (use model) when uncertain.
     """
     engine = None
-    if GODOT_KEYWORDS.search(text):
-        engine = "godot"
-    elif UNITY_KEYWORDS.search(text):
-        engine = "unity"
-    elif ASSET_KEYWORDS.search(text):
-        engine = "asset"
-    elif BUILD_KEYWORDS.search(text):
+    if BUILD_KEYWORDS.search(text):
         engine = "debugger"
     else:
         from agents.profiles import AGENT_PROFILES

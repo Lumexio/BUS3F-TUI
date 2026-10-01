@@ -16,15 +16,17 @@ DISTRO="unknown"
 
 if command -v pacman >/dev/null 2>&1 || [ "$DISTRO" = "arch" ] || [ "${ID_LIKE:-}" = "arch" ]; then
     echo "  → Arch Linux detected (${DISTRO})"
-    sudo pacman -S --needed --noconfirm git curl cmake base-devel python python-pip python-requests python-prompt_toolkit python-pygments python-yaml
+    sudo pacman -S --needed --noconfirm git curl cmake base-devel python python-pip python-requests python-prompt_toolkit python-pygments python-yaml procps-ng
 elif command -v apt-get >/dev/null 2>&1 || [ "$DISTRO" = "ubuntu" ] || [ "$DISTRO" = "debian" ]; then
     echo "  → Debian/Ubuntu detected (${DISTRO})"
-    PKGS="git curl cmake build-essential"
-    command -v python3 >/dev/null 2>&1 || PKGS="python3 python3-venv ${PKGS}"
+    PKGS="git curl cmake build-essential python3 python3-venv python3-pip procps"
     sudo apt-get update -qq && sudo apt-get install -y -qq ${PKGS}
 elif command -v dnf >/dev/null 2>&1; then
     echo "  → Fedora/RHEL detected (${DISTRO})"
-    sudo dnf install -y git curl cmake gcc-c++ python3 python3-pip
+    sudo dnf install -y git curl cmake gcc-c++ python3 python3-pip python3-devel procps-ng
+elif command -v zypper >/dev/null 2>&1; then
+    echo "  → openSUSE/SLES detected (${DISTRO})"
+    sudo zypper install -y git curl cmake gcc-c++ python3 python3-pip python3-devel procps
 else
     echo "  → Generic Linux (${DISTRO}); skipping system package install"
 fi
@@ -37,8 +39,9 @@ if [ ! -x "${LLAMA_BIN}" ] && ! command -v llama-server >/dev/null 2>&1; then
     [ -d "${HOME}/llama.cpp" ] || git clone --depth 1 https://github.com/ggerganov/llama.cpp "${HOME}/llama.cpp"
     CUDA_OPT=""
     command -v nvcc >/dev/null 2>&1 && CUDA_OPT="-DGGML_CUDA=ON"
+    BUILD_JOBS="$(python3 -c 'import os; print(min(4, os.cpu_count() or 2))' 2>/dev/null || echo 2)"
     cmake -B "${HOME}/llama.cpp/build" "${HOME}/llama.cpp" ${CUDA_OPT}
-    cmake --build "${HOME}/llama.cpp/build" --config Release -j "$(python3 -c 'import os; print(os.cpu_count() or 4)')" --target llama-server
+    cmake --build "${HOME}/llama.cpp/build" --config Release -j "${BUILD_JOBS}" --target llama-server
 fi
 
 # 3. Virtual environment setup (optional, fallback to system python)
@@ -47,7 +50,9 @@ if [ ! -f "${DIR}/venv/bin/python" ]; then
     python3 -m venv --system-site-packages "${DIR}/venv" 2>/dev/null || python3 -m venv "${DIR}/venv" 2>/dev/null || true
 fi
 if [ -x "${DIR}/venv/bin/pip" ]; then
-    "${DIR}/venv/bin/pip" install --quiet requests prompt_toolkit pygments tree-sitter tree-sitter-c-sharp || true
+    "${DIR}/venv/bin/pip" install --quiet requests prompt_toolkit pygments || true
+else
+    python3 -m pip install --user --quiet requests prompt_toolkit pygments 2>/dev/null || true
 fi
 
 # 4. Create global 'bus3f-tui' command
@@ -82,8 +87,8 @@ for RC in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
 done
 
 # Optional: Windows CMD launcher when on WSL
-if [ -d "/mnt/c/Users" ]; then
-    WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r\n')
+if [ -d "/mnt/c/Users" ] && command -v cmd.exe >/dev/null 2>&1; then
+    WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r\n ')
     if [ -n "${WIN_USER}" ] && [ -d "/mnt/c/Users/${WIN_USER}" ]; then
         WIN_BAT="/mnt/c/Users/${WIN_USER}/bus3f-tui.bat"
         cat << 'EOF' > "${WIN_BAT}"

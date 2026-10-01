@@ -47,6 +47,12 @@ fi
 THREADS="${LLAMA_THREADS:-$(python3 -c 'import os; print(os.cpu_count() or 4)')}"
 PORT="${LLAMA_PORT:-8080}"
 
+# Terminate any leftover zombie instance before binding
+if command -v pkill >/dev/null 2>&1; then
+  pkill -f llama-server 2>/dev/null || true
+  sleep 0.5
+fi
+
 exec "${LLAMA_BIN}" \
   --model "${MODEL}" \
   -ngl 99 \

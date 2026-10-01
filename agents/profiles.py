@@ -98,12 +98,6 @@ AGENT_PROFILES: dict[str, dict] = {
     },
 }
 
-# Legacy engine alias compatibility mappings
-AGENT_PROFILES["godot"] = AGENT_PROFILES["coder"]
-AGENT_PROFILES["unity"] = AGENT_PROFILES["coder"]
-AGENT_PROFILES["asset"] = AGENT_PROFILES["coder"]
-AGENT_PROFILES["build"] = AGENT_PROFILES["debugger"]
-
 CUSTOM_AGENTS_DIR = Path.home() / "agent_team" / "custom_agents"
 
 

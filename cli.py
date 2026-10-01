@@ -39,11 +39,7 @@ try:
     from prompt_toolkit.lexers import Lexer, PygmentsLexer
     from prompt_toolkit.styles.pygments import style_from_pygments_cls
     from pygments.styles import get_style_by_name
-    from pygments.lexers.dotnet import CSharpLexer
-    try:
-        from pygments.lexers.gdscript import GDScriptLexer
-    except ImportError:
-        from pygments.lexers.python import PythonLexer as GDScriptLexer
+    from pygments.lexers import guess_lexer
     HAS_PYGMENTS = True
 except ImportError:
     HAS_PYGMENTS = False
@@ -152,13 +148,9 @@ def load_config() -> dict:
 
     proj = cfg.get("project")
     if not proj or not Path(proj).exists() or "NONNULL" in proj:
-        cwd = Path.cwd()
-        has_gd = (cwd / "project.godot").exists() or any(cwd.glob("*.gd"))
-        has_cs = (cwd / "Assets").exists() or any(cwd.glob("*.cs"))
-        cfg["project"] = str(cwd)
-        cfg["engine"] = "godot" if has_gd else "unity" if has_cs else "coder"
+        cfg["project"] = str(Path.cwd())
 
-    if cfg.get("engine") in ("general", None):
+    if cfg.get("engine") not in ("coder", "reviewer", "debugger", "general"):
         cfg["engine"] = "coder"
     cfg.setdefault("exec_mode", "sequential")
     return cfg
@@ -179,11 +171,8 @@ def set_project(raw: str):
     if not p.exists():
         print(f"\n  {C.RED}Directory not found:{C.RESET} {p}\n")
         return
-    has_gd = (p / "project.godot").exists() or next(p.rglob("*.gd"), None) is not None
-    has_cs = (p / "Assets").exists() or next(p.rglob("*.cs"), None) is not None
-    engine = "godot" if has_gd else "unity" if has_cs else "general"
-    save_config({"project": str(p), "engine": engine})
-    print(f"\n  {C.GREEN}✓{C.RESET} Active project: {C.BOLD}{p.name}{C.RESET}  {C.DIM}({engine}){C.RESET}")
+    save_config({"project": str(p), "engine": "general"})
+    print(f"\n  {C.GREEN}✓{C.RESET} Active project: {C.BOLD}{p.name}{C.RESET}")
     print(f"    {C.DIM}{p}{C.RESET}")
     if (p / "MEMORY.md").exists():
         print(f"    {C.DIM}Memory: MEMORY.md active{C.RESET}")
@@ -209,30 +198,28 @@ def init_codebase():
         print(f"\n  {C.YELLOW}No active project set. Use: project <path>{C.RESET}\n")
         return
     rule(f"init · {p.name}")
-    engine = cfg.get("engine", "general")
-    ext = "*.cs" if engine == "unity" else "*.gd" if engine == "godot" else "*.*"
-    ignored = {".git", "Library", "obj", "bin", ".import", ".idea", "Build", "Temp"}
-    files = [f for f in sorted(p.rglob(ext)) if not any(x in f.parts for x in ignored)]
+    ignored = {".git", "node_modules", "target", "build", "dist", ".venv", "venv", "__pycache__", "Library", "obj", "bin", ".import", ".idea", "Build", "Temp"}
+    code_exts = {".py", ".rs", ".ts", ".js", ".go", ".c", ".cpp", ".h", ".hpp", ".cs", ".gd", ".java", ".kt", ".rb", ".php", ".sh", ".json", ".yaml", ".yml", ".toml", ".md"}
+    files = [f for f in sorted(p.rglob("*")) if f.is_file() and f.suffix.lower() in code_exts and not any(x in f.parts for x in ignored)]
 
     lines = [
-        f"# Project Context — {p.name} ({engine.upper()})",
+        f"# Project Context — {p.name}",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"Total scripts: {len(files)}",
+        f"Total files: {len(files)}",
         "",
         "## Invariants & Architecture",
-        f"- Target Engine: {engine.upper()}",
         "- Core conventions: see AGENTS.md",
         "",
-        "## Core Scripts Inventory",
+        "## Core Inventory",
     ]
     for f in files[:40]:
         lines.append(f"- `{f.relative_to(p)}` ({f.stat().st_size:,} bytes)")
     if len(files) > 40:
-        lines.append(f"- … and {len(files)-40} more scripts")
+        lines.append(f"- … and {len(files)-40} more files")
 
     mem_file = p / "MEMORY.md"
     mem_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"\n  {C.GREEN}✓{C.RESET} Scraped {len(files)} scripts → {C.BOLD}{p.name}/MEMORY.md{C.RESET}\n")
+    print(f"\n  {C.GREEN}✓{C.RESET} Scraped {len(files)} files → {C.BOLD}{p.name}/MEMORY.md{C.RESET}\n")
 
 # ── Plugins & Skills ──────────────────────────────────────────────────────────
 PLUGINS_DIR = Path.home() / "agent_team" / "plugins"
@@ -547,7 +534,17 @@ def _restart_server_with_model(model_name: str = "") -> bool:
     import subprocess
     import urllib.request
     subprocess.run(["pkill", "-f", "llama-server"], check=False)
-    time.sleep(0.5)
+    for _ in range(10):
+        time.sleep(0.3)
+        try:
+            with urllib.request.urlopen("http://localhost:8080/health", timeout=0.5):
+                pass
+        except Exception:
+            break
+    else:
+        subprocess.run(["pkill", "-9", "-f", "llama-server"], check=False)
+        time.sleep(0.5)
+
     launcher = Path(__file__).parent / "scripts" / "launch_server.sh"
     if launcher.exists():
         args = ["bash", str(launcher)]
@@ -555,7 +552,7 @@ def _restart_server_with_model(model_name: str = "") -> bool:
             args.append(model_name)
         subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         print(f"  → Starting llama-server with {model_name or 'model'}…")
-        for _ in range(15):
+        for _ in range(20):
             time.sleep(1)
             try:
                 with urllib.request.urlopen("http://localhost:8080/health", timeout=1) as resp:
@@ -595,13 +592,135 @@ def list_models():
         is_active = (f.name == active) or (not active and "7b" in f.name.lower())
         tag = f" {C.GREEN}● active{C.RESET}" if is_active else ""
         print(f"  [{i}] {C.CYAN}{f.name:<46}{C.RESET} {C.DIM}({size_gb:.1f} GB){C.RESET}{tag}")
-    print(f"\n  {C.DIM}Switch model: model switch <number_or_name>{C.RESET}")
+    print(f"\n  {C.DIM}Select model: /select-model [number_or_name]{C.RESET}")
     print(f"  {C.DIM}Add model:    /new-model [alias_or_url]{C.RESET}\n")
+
+def curses_model_picker(files: list[Path], active_name: str = "") -> str | None:
+    """Full-screen curses multi-column scrolling pagination dialog to select a model."""
+    try:
+        import curses
+
+        def _ui(stdscr):
+            curses.curs_set(0)
+            stdscr.keypad(True)
+            n = len(files)
+            selected = next((i for i, f in enumerate(files) if f.name == active_name), 0)
+            top_row = 0
+
+            while True:
+                stdscr.clear()
+                h, w = stdscr.getmaxyx()
+                num_cols = 2 if w >= 90 and n > max(1, h - 6) else 1
+                col_width = (w - 6) // num_cols if num_cols > 1 else max(20, w - 4)
+                visible_rows = max(1, h - 6)
+                total_rows = (n + num_cols - 1) // num_cols
+
+                sel_row = selected // num_cols
+                if sel_row < top_row:
+                    top_row = sel_row
+                elif sel_row >= top_row + visible_rows:
+                    top_row = sel_row - visible_rows + 1
+                top_row = max(0, min(top_row, max(0, total_rows - visible_rows)))
+
+                # Header
+                title = "── Select GGUF Model ──"
+                stdscr.addstr(1, max(0, (w - len(title)) // 2), title[:w - 2], curses.A_BOLD)
+                if top_row > 0:
+                    stdscr.addstr(2, max(0, w // 2 - 2), "▲ ▲", curses.A_DIM)
+
+                # Render grid
+                for r in range(visible_rows):
+                    m_row = top_row + r
+                    if m_row >= total_rows:
+                        break
+                    screen_y = 3 + r
+                    for c in range(num_cols):
+                        idx = m_row * num_cols + c
+                        if idx >= n:
+                            break
+                        col_x = 2 + c * (col_width + 2)
+                        f = files[idx]
+                        size_gb = f.stat().st_size / (1024**3)
+                        tag = " [active]" if f.name == active_name else ""
+                        label = f"[{idx + 1}] {f.name} ({size_gb:.1f}G){tag}"
+                        if len(label) > col_width:
+                            label = label[:col_width - 3] + "..."
+                        label = label.ljust(col_width)
+                        attr = curses.A_REVERSE | curses.A_BOLD if idx == selected else curses.A_NORMAL
+                        stdscr.addstr(screen_y, col_x, label[:w - col_x - 1], attr)
+
+                # Bottom scroll indicator
+                if top_row + visible_rows < total_rows:
+                    stdscr.addstr(h - 3, max(0, w // 2 - 2), "▼ ▼", curses.A_DIM)
+
+                # Footer
+                footer = f"[{selected + 1}/{n}] Row {sel_row + 1}/{total_rows} · ↑/↓/←/→: navigate · Enter: select · Esc/q: cancel"
+                if len(footer) > w - 2:
+                    footer = f"[{selected + 1}/{n}] ↑/↓/←/→ Enter Esc"
+                stdscr.addstr(h - 2, max(0, (w - len(footer)) // 2), footer[:w - 2], curses.A_DIM)
+
+                stdscr.refresh()
+                ch = stdscr.getch()
+                if ch in (curses.KEY_UP, ord('k')):
+                    selected = (selected - num_cols) if selected >= num_cols else ((total_rows - 1) * num_cols + (selected % num_cols))
+                    if selected >= n:
+                        selected = n - 1
+                elif ch in (curses.KEY_DOWN, ord('j')):
+                    selected = (selected + num_cols) if selected + num_cols < n else (selected % num_cols)
+                elif ch in (curses.KEY_LEFT, ord('h')):
+                    selected = (selected - 1) % n
+                elif ch in (curses.KEY_RIGHT, ord('l')):
+                    selected = (selected + 1) % n
+                elif ch in (curses.KEY_PPAGE,):
+                    selected = max(0, selected - visible_rows * num_cols)
+                elif ch in (curses.KEY_NPAGE,):
+                    selected = min(n - 1, selected + visible_rows * num_cols)
+                elif ch in (10, 13, curses.KEY_ENTER):
+                    return files[selected].name
+                elif ch in (27, ord('q'), ord('Q')):
+                    return None
+                elif ch == curses.KEY_RESIZE:
+                    continue
+
+        return curses.wrapper(_ui)
+    except Exception:
+        return None
+
+def select_model(target: str = ""):
+    files = sorted(MODELS_DIR.glob("*.gguf"))
+    if not files:
+        print(f"\n  {C.YELLOW}No models found in {MODELS_DIR}. Add one via /new-model{C.RESET}\n")
+        return
+    if not target:
+        cfg = load_config()
+        active = cfg.get("active_model", "")
+        if sys.stdin.isatty():
+            picked = curses_model_picker(files, active)
+            if picked:
+                switch_model(picked)
+                return
+            elif picked is None and sys.stdin.isatty():
+                print(f"\n  {C.DIM}Model selection cancelled.{C.RESET}\n")
+                return
+        # Fallback to prompt if curses is unavailable
+        list_models()
+        try:
+            choice = input(f"  Select model [1-{len(files)}] or name (Enter to cancel): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not choice:
+            return
+        target = choice
+    switch_model(target)
 
 def switch_model(target: str = ""):
     files = sorted(MODELS_DIR.glob("*.gguf"))
     if not files:
         print(f"\n  {C.YELLOW}No models found in {MODELS_DIR}. Add one via /new-model{C.RESET}\n")
+        return
+    if not target:
+        select_model()
         return
     cfg = load_config()
     target = target.strip().lower()
@@ -839,6 +958,8 @@ COMMANDS_HELP: dict[str, str] = {
     "/mode": "switch multi-agent mode [/mode parallel|sequential]",
     "/team": "run multi-agent task [/team <agents> <task>]",
     "/models": "list installed GGUF models in ~/models",
+    "/select-model": "interactively select or switch active GGUF model [/select-model <num|name>]",
+    "select-model": "interactively select or switch active GGUF model [select-model <num|name>]",
     "/new-model": "download & install new GGUF model [/new-model <url>]",
     "/search-model": "search HuggingFace for GGUF models & install",
     "/agents": "list local specialist and custom sub-agents",
@@ -879,12 +1000,10 @@ def setup_readline():
             if cmd in ("/mode", "mode"):
                 cands = ["parallel", "sequential"]
             elif cmd in ("/grammar", "grammar"):
-                cands = ["reset", "tree_sitter_c_sharp", "tree_sitter_gdscript"]
+                cands = ["reset", "tree_sitter_c_sharp"]
             elif cmd in ("/resume", "resume", "/delete", "delete", "/del", "del", "/branch", "branch"):
                 cands = [s["id"] for s in list_sessions()]
-            elif cmd in ("scan", "/scan"):
-                cands = ["godot", "unity"]
-            elif cmd in ("model", "/model") or (len(parts) >= 2 and parts[1] in ("switch", "use")):
+            elif cmd in ("model", "/model", "select-model", "/select-model") or (len(parts) >= 2 and parts[1] in ("switch", "use", "select")):
                 cands = [p.name for p in MODELS_DIR.glob("*.gguf")]
             else:
                 cands = []
@@ -1077,11 +1196,9 @@ if HAS_PROMPT_TOOLKIT:
                 if cmd in ("/mode", "mode"):
                     cands = [("parallel", "Concurrent agent execution"), ("sequential", "Pipeline agent execution")]
                 elif cmd in ("/grammar", "grammar"):
-                    cands = [("reset", "Reset to default C# Tree-sitter"), ("tree_sitter_c_sharp", "C# parser"), ("tree_sitter_gdscript", "GDScript parser")]
+                    cands = [("reset", "Reset to default Tree-sitter"), ("tree_sitter_c_sharp", "C# parser")]
                 elif cmd in ("/resume", "resume", "/delete", "delete", "/del", "del", "/branch", "branch"):
                     cands = [(s["id"], s.get("title") or "Session") for s in list_sessions()]
-                elif cmd in ("scan", "/scan"):
-                    cands = [("godot", "Scan Godot 3.5 GDScript files"), ("unity", "Scan Unity 2018.2 C# files")]
                 elif cmd in ("model", "/model") or (len(parts) >= 2 and parts[1] in ("switch", "use")):
                     cands = [(p.name, f"{p.stat().st_size / (1024**3):.1f} GB") for p in MODELS_DIR.glob("*.gguf")]
 
@@ -1107,25 +1224,21 @@ if HAS_PROMPT_TOOLKIT:
         event.current_buffer.insert_text("\n")
 
     if HAS_PYGMENTS:
-        class GameDevInputLexer(Lexer):
-            def __init__(self):
-                self.cs = PygmentsLexer(CSharpLexer)
-                self.gd = PygmentsLexer(GDScriptLexer)
-
+        class UniversalInputLexer(Lexer):
             def lex_document(self, document):
                 txt = document.text
                 if txt.strip().startswith("/"):
                     return lambda lineno: []
-                cfg = load_config()
-                eng = cfg.get("engine", "unity")
-                if eng == "unity" or any(k in txt for k in ("using ", "public ", "class ", "void ", "MonoBehaviour")):
-                    return self.cs.lex_document(document)
-                return self.gd.lex_document(document)
+                try:
+                    lex = guess_lexer(txt)
+                    return PygmentsLexer(type(lex)).lex_document(document)
+                except Exception:
+                    return lambda lineno: []
 
     class TreeSitterSemanticLexer(Lexer):
         """AST-level semantic variable, type, parameter and method coloring via isolated Tree-sitter worker process."""
         def __init__(self, debounce_sec: float = 0.04, grammar_plugin: str | None = None):
-            self.pygments = GameDevInputLexer() if HAS_PYGMENTS else None
+            self.pygments = UniversalInputLexer() if HAS_PYGMENTS else None
             self.grammar_plugin = grammar_plugin
             self.proc = None
             self.parent_conn = None
@@ -1310,7 +1423,7 @@ def get_prompt_session():
         plugin = cfg.get("grammar_plugin", None)
         lexer = TreeSitterSemanticLexer(grammar_plugin=plugin)
     elif HAS_PYGMENTS:
-        lexer = GameDevInputLexer()
+        lexer = UniversalInputLexer()
 
     if HAS_PYGMENTS:
         try:
@@ -1467,27 +1580,15 @@ def check_server() -> bool:
     except Exception:
         return False
 
-def _build_inventory(engine: str) -> str:
+def _build_inventory(engine: str = "") -> str:
     """Build a compact file inventory to inject into the prompt."""
     cfg = load_config()
     active_root = Path(cfg["project"]) if cfg.get("project") else None
     if not active_root or not active_root.exists():
         return ""
     root = active_root
-
-    if engine == "godot":
-        exts = ["*.gd"]
-        label = f"{root.name} (Godot 3.5)"
-    elif engine == "unity":
-        if (root / "Assets" / "Scripts").exists():
-            root = root / "Assets" / "Scripts"
-        elif (root / "Scripts").exists():
-            root = root / "Scripts"
-        exts = ["*.cs"]
-        label = f"{root.name} (Unity 2018.2)"
-    else:
-        exts = ["*.py", "*.ts", "*.js", "*.rs", "*.go", "*.cs", "*.gd", "*.cpp", "*.c", "*.h"]
-        label = f"{root.name} (coder)"
+    exts = ["*.py", "*.ts", "*.js", "*.rs", "*.go", "*.cs", "*.gd", "*.cpp", "*.c", "*.h"]
+    label = f"{root.name}"
 
     if not root.exists():
         return ""
@@ -1545,16 +1646,15 @@ def quick_reply(text: str) -> str | None:
     if clean in ("can i ask you something", "can i ask a question", "can i ask you a question", "can i ask something"):
         return "Of course! What are you working on?"
     if clean in ("who are you", "what are you"):
-        return "I am your local game-dev agent for Godot 3.5 and Unity 2018.2."
+        return "I am bus3f-tui: a 100% offline, air-gapped local multi-agent coding harness."
     if clean in ("what can you do", "help me"):
-        return "I can scan APIs, explain architecture, scaffold scripts, fix bugs, and migrate Godot to Unity. Type 'help' for commands."
+        return "I can inspect codebases, explain architecture, scaffold code, fix bugs, and review implementations. Type 'help' for commands."
     if clean in ("thank you", "thanks", "thx"):
         return "You're welcome! Let me know what you need next."
     if (len(words) <= 3 and words[0] in ("hi", "hello", "hey", "hola", "yo", "sup", "howdy", "greetings")) or clean in ("good morning", "good afternoon", "good evening", "whats up", "what is up", "how are you"):
         cfg = load_config()
         p_name = Path(cfg.get("project", "")).name or "no project"
-        eng = cfg.get("engine", "general")
-        return f"Hello! Ready to assist with {p_name} ({eng}).\n     {C.DIM}Try: scan, explain <file>, fix <issue>, scaffold <name>, /init, /models{C.RESET}"
+        return f"Hello! Ready to assist with {p_name}.\n     {C.DIM}Try: explain <file>, fix <issue>, scaffold <name>, init, /models{C.RESET}"
 
     return None
 
@@ -1828,14 +1928,9 @@ def run_task(user_input: str):
     task   = route_result["task"]
     method = route_result["method"]
 
-    # Fallback to file extension or active project engine
-    if file_path:
-        if file_path.endswith(".cs") and engine != "unity":
-            engine = "unity"
-        elif file_path.endswith(".gd") and engine != "godot":
-            engine = "godot"
-    if engine == "general" and active_engine in ("unity", "godot") and (file_path or task in ("edit", "scaffold", "debug")):
-        engine = active_engine
+    # Fallback for file editing / scaffolding tasks
+    if file_path and task in ("edit", "scaffold", "debug") and engine == "general":
+        engine = "coder"
 
     print(f"\n  {C.DIM}engine:{engine}  task:{task}  via:{method}{C.RESET}")
 
@@ -2059,6 +2154,9 @@ def main():
         elif args[0] in ("models", "/models") and len(args) == 1:
             list_models()
             return
+        elif args[0] in ("select-model", "/select-model"):
+            select_model(args[1] if len(args) > 1 else "")
+            return
         elif args[0] in ("search-model", "/search-model", "find-model", "/find-model"):
             search_and_install_model(args[1] if len(args) > 1 else "")
             return
@@ -2194,9 +2292,15 @@ def main():
                 create_agent_wizard()
             elif cmd in ("/models", "models"):
                 list_models()
-            elif cmd.startswith(("model switch ", "/model switch ", "model use ", "/model use ")):
+            elif cmd in ("/select-model", "select-model") or cmd.startswith(("/select-model ", "select-model ")):
+                parts = user_input.split(maxsplit=1)
+                target = parts[1].strip() if len(parts) > 1 else ""
+                select_model(target)
+            elif cmd.startswith(("model switch ", "/model switch ", "model use ", "/model use ", "model select ", "/model select ")):
                 target = user_input.split()[-1]
                 switch_model(target)
+            elif cmd in ("model switch", "/model switch", "model select", "/model select"):
+                select_model()
             elif cmd.startswith(("/search-model ", "search-model ", "/find-model ", "find-model ")):
                 query = user_input.split(maxsplit=1)[1]
                 search_and_install_model(query)

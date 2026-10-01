@@ -1,6 +1,6 @@
 # ~/agent_team/main.py
 """
-Entry point for the game-dev agent team.
+Headless task runner for BUS3F-TUI multi-agent harness.
 Usage: python main.py "your task here"
        python main.py  (interactive mode)
 """
@@ -97,7 +97,7 @@ def main() -> None:
     if len(sys.argv) > 1:
         run_task(" ".join(sys.argv[1:]))
     else:
-        print("Game-Dev Agent Team — Interactive Mode")
+        print("BUS3F-TUI Multi-Agent Task Runner — Interactive Mode")
         print("Type 'quit' to exit.\n")
         while True:
             try:

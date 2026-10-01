@@ -1,5 +1,5 @@
 # ~/agent_team/grammars/router.gbnf
 root   ::= "{" ws "\"engine\"" ws ":" ws engine ws "," ws "\"task\"" ws ":" ws task ws "}"
-engine ::= "\"coder\"" | "\"reviewer\"" | "\"debugger\"" | "\"general\"" | "\"godot\"" | "\"unity\"" | "\"asset\"" | "\"build\""
+engine ::= "\"coder\"" | "\"reviewer\"" | "\"debugger\"" | "\"general\""
 task   ::= "\"edit\"" | "\"review\"" | "\"explain\"" | "\"debug\"" | "\"scaffold\""
 ws     ::= [ \t\n]*
