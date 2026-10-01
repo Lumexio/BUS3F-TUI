@@ -36,9 +36,10 @@ def run_task(user_input: str) -> None:
     session_id = route_result["session_id"]
     print(f"[dispatch] → {profile['name']}")
 
-    # Extract file path from input
-    file_match = _re.search(r'(/[\w./\-\\ ]+\.(gd|cs|tscn|unity|log|txt))', user_input)
-    file_path = file_match.group(1).strip() if file_match else None
+    # Extract file path from input (supports absolute, relative, and quoted paths)
+    file_match = _re.search(r'["\']([^"\']+\.(?:gd|cs|tscn|unity|log|txt))["\']|(?:^|\s)([\w.\-/\\]+\.(?:gd|cs|tscn|unity|log|txt))\b', user_input)
+    raw_path = (file_match.group(1) or file_match.group(2)).strip() if file_match else None
+    file_path = str(_Path(raw_path).resolve()) if raw_path and _Path(raw_path).exists() else raw_path
     file_content = None
 
     if file_path:

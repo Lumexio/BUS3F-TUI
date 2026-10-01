@@ -141,19 +141,27 @@ class Spinner:
         print("\r" + " " * 70 + "\r", end="", flush=True)
 
 # ── Configuration & Active Project ───────────────────────────────────────────
-CONFIG_PATH = Path.home() / "agent_team" / "config.json"
+CONFIG_PATH = Path(__file__).parent / "config.json" if (Path(__file__).parent / "config.json").exists() else (Path.home() / "agent_team" / "config.json")
 
 def load_config() -> dict:
+    cfg = {}
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {
-        "project": "/mnt/c/Users/Piaczo/Documents/Projects/Personal/game-dev-main/NONNULL",
-        "engine": "unity",
-        "exec_mode": "sequential",
-    }
+
+    proj = cfg.get("project")
+    if not proj or not Path(proj).exists() or "NONNULL" in proj:
+        cwd = Path.cwd()
+        has_gd = (cwd / "project.godot").exists() or any(cwd.glob("*.gd"))
+        has_cs = (cwd / "Assets").exists() or any(cwd.glob("*.cs"))
+        cfg["project"] = str(cwd)
+        cfg["engine"] = "godot" if has_gd else "unity" if has_cs else "general"
+
+    cfg.setdefault("engine", "general")
+    cfg.setdefault("exec_mode", "sequential")
+    return cfg
 
 def save_config(cfg: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1300,8 +1308,8 @@ def get_prompt_session():
 # ── UI primitives ─────────────────────────────────────────────────────────────
 def banner():
     print(f"""
-{C.BOLD}  game-dev agent{C.RESET}  {C.DIM}Godot 3.5 · Unity 2018.2 · local{C.RESET}
-  {C.DIM}────────────────────────────────────────{C.RESET}
+{C.BOLD}  bus3f-tui{C.RESET}  {C.DIM}100% offline · air-gapped · multi-agent coding harness{C.RESET}
+  {C.DIM}──────────────────────────────────────────────────────────{C.RESET}
   {C.DIM}Type '/' and press [Tab] for command suggestions{C.RESET}""")
 
 def rule(label: str = ""):
@@ -2094,7 +2102,8 @@ def main():
     while True:
         try:
             cfg = load_config()
-            proj_name = Path(cfg["project"]).name if cfg.get("project") else "no-project"
+            proj_path = Path(cfg["project"]) if cfg.get("project") else Path.cwd()
+            proj_name = "local" if proj_path in (Path.home(), Path("/")) else proj_path.name
             eng = cfg.get("engine", "general")
             exec_mode = cfg.get("exec_mode", "sequential")
             active_sid = get_active_session()

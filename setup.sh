@@ -16,7 +16,7 @@ DISTRO="unknown"
 
 if command -v pacman >/dev/null 2>&1 || [ "$DISTRO" = "arch" ] || [ "${ID_LIKE:-}" = "arch" ]; then
     echo "  → Arch Linux detected (${DISTRO})"
-    sudo pacman -S --needed --noconfirm git curl cmake base-devel python python-pip
+    sudo pacman -S --needed --noconfirm git curl cmake base-devel python python-pip python-requests python-prompt_toolkit python-pygments python-yaml
 elif command -v apt-get >/dev/null 2>&1 || [ "$DISTRO" = "ubuntu" ] || [ "$DISTRO" = "debian" ]; then
     echo "  → Debian/Ubuntu detected (${DISTRO})"
     PKGS="git curl cmake build-essential"
@@ -44,22 +44,22 @@ fi
 # 3. Virtual environment setup (optional, fallback to system python)
 echo "[3/6] Setting up Python venv..."
 if [ ! -f "${DIR}/venv/bin/python" ]; then
-    python3 -m venv "${DIR}/venv" 2>/dev/null || true
+    python3 -m venv --system-site-packages "${DIR}/venv" 2>/dev/null || python3 -m venv "${DIR}/venv" 2>/dev/null || true
 fi
 if [ -x "${DIR}/venv/bin/pip" ]; then
-    "${DIR}/venv/bin/pip" install --quiet prompt_toolkit pygments tree-sitter tree-sitter-c-sharp pyyaml || true
+    "${DIR}/venv/bin/pip" install --quiet requests prompt_toolkit pygments tree-sitter tree-sitter-c-sharp pyyaml || true
 fi
 
 # 4. Create global 'bus3f-tui' command
 echo "[4/6] Installing 'bus3f-tui' launcher..."
-cat << 'EOF' > "${BIN_DIR}/bus3f-tui"
+cat << EOF > "${BIN_DIR}/bus3f-tui"
 #!/usr/bin/env bash
-TEAM_DIR="${HOME}/agent_team"
-PYTHON_BIN="${TEAM_DIR}/venv/bin/python"
-if [ ! -x "${PYTHON_BIN}" ]; then
-    PYTHON_BIN="$(command -v python3 || command -v python)"
+TEAM_DIR="${DIR}"
+PYTHON_BIN="\${TEAM_DIR}/venv/bin/python"
+if [ ! -x "\${PYTHON_BIN}" ]; then
+    PYTHON_BIN="\$(command -v python3 || command -v python)"
 fi
-exec "${PYTHON_BIN}" "${TEAM_DIR}/cli.py" "$@"
+exec "\${PYTHON_BIN}" "\${TEAM_DIR}/cli.py" "\$@"
 EOF
 chmod +x "${BIN_DIR}/bus3f-tui"
 
