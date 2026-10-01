@@ -10,7 +10,11 @@ import os
 import re
 import json
 import sqlite3
-import yaml
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +24,15 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 def _safe_path(raw: str, must_exist: bool = True) -> Path:
-    """Resolve path, refuse traversal outside HOME."""
+    """Resolve path, refuse traversal. Allows HOME, /tmp, and /mnt/ (WSL Windows mounts)."""
     p = Path(raw).expanduser().resolve()
     home = Path.home().resolve()
-    if home not in p.parents and p != home:
+    allowed_roots = [
+        home,
+        Path("/tmp").resolve(),
+        Path("/mnt").resolve(),  # WSL Windows filesystem mounts
+    ]
+    if not any(str(p).startswith(str(root)) for root in allowed_roots):
         raise ValueError(f"Path escape rejected: {p}")
     if must_exist and not p.exists():
         raise FileNotFoundError(f"File not found: {p}")
@@ -51,12 +60,28 @@ def read_gd(path: str) -> dict[str, Any]:
         return {"ok": False, "content": None, "error": str(e)}
 
 
-def write_gd_dry(path: str, content: str, commit: bool = False) -> dict[str, Any]:
+def _normalize_code(content: str) -> str:
+    """Normalize literal backslash-escapes from LLM JSON responses."""
+    if not content:
+        return content
+    if "\\n" in content and (content.count("\\n") > content.count("\n")):
+        content = content.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+        if '\\"' in content:
+            content = content.replace('\\"', '"')
+    return content
+
+
+def write_gd_dry(path: str = None, content: str = None, commit: bool = False) -> dict[str, Any]:
     """
     Write GDScript. Always converts spaces→tabs before writing.
     If commit=False (default), returns the would-be content without touching disk.
     If commit=True, writes to disk.
     """
+    if not path:
+        return {"ok": False, "error": "path is required for write_gd_dry"}
+    if content is None:
+        return {"ok": False, "error": "content is required for write_gd_dry"}
+    content = _normalize_code(content)
     # Force tab indentation: replace leading spaces (4 or 2) with tabs
     fixed_lines = []
     for line in content.splitlines():
@@ -112,12 +137,17 @@ def read_cs(path: str) -> dict[str, Any]:
         return {"ok": False, "content": None, "error": str(e)}
 
 
-def write_cs_dry(path: str, content: str, commit: bool = False) -> dict[str, Any]:
+def write_cs_dry(path: str = None, content: str = None, commit: bool = False) -> dict[str, Any]:
     """
     Write C#. Checks brace style (braces must be on new line after control structures).
     If brace violations found, reports them but still writes (style is advisory for C#).
     If commit=False, dry-run only.
     """
+    if not path:
+        return {"ok": False, "error": "path is required for write_cs_dry"}
+    if content is None:
+        return {"ok": False, "error": "content is required for write_cs_dry"}
+    content = _normalize_code(content)
     brace_violations = []
     for i, line in enumerate(content.splitlines(), 1):
         # Detect inline opening brace after if/for/while/else/try — Allman style required
@@ -151,6 +181,7 @@ def write_cs_dry(path: str, content: str, commit: bool = False) -> dict[str, Any
 
 # Godot 4 patterns that are INVALID in Godot 3.5
 GODOT4_PATTERNS: list[tuple[str, str]] = [
+    (r'\bfunc\s+\w+\s*\([^)]*\w+\s*:\s*\w+[^)]*\)', "parameter type hint (not supported in 3.5)"),
     (r'@export\b', "@export (use 'export var' instead)"),
     (r'@onready\b', "@onready (use 'onready var' instead)"),
     (r'\bawait\b', "await keyword (use yield() in Godot 3.5)"),
@@ -172,26 +203,31 @@ GODOT4_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-def check_godot35_apis(content: str) -> dict[str, Any]:
+def check_godot35_apis(content: str = None, path: str = None) -> dict[str, Any]:
     """
-    Scan GDScript content for Godot 4 patterns that are invalid in Godot 3.5.
-    Returns list of violations with line numbers.
+    Scan GDScript content for Godot 4 patterns invalid in Godot 3.5.
+    Accepts either content (string) or path (file path) as argument.
     """
+    if content and not path and (content.endswith(".gd") or "\n" not in content.strip()):
+        path, content = content.strip(), None
+    if content is None and path is not None:
+        try:
+            content = _safe_path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return {"ok": False, "violations": [], "violation_count": 0, "passed": False, "error": str(e)}
+    if content is None:
+        return {"ok": False, "violations": [], "violation_count": 0, "passed": False, "error": "No content or path provided"}
+
     violations = []
-    for i, line in enumerate(content.splitlines(), 1):
-        # Skip comment lines
-        if line.strip().startswith("#"):
-            continue
-        for pattern, description in GODOT4_PATTERNS:
+    lines = content.splitlines()
+    for i, line in enumerate(lines, 1):
+        for pattern, desc in GODOT4_PATTERNS:
             if re.search(pattern, line):
-                violations.append({
-                    "line": i,
-                    "text": line.strip(),
-                    "violation": description,
-                    "pattern": pattern,
-                })
+                violations.append({"line": i, "violation": desc, "text": line.strip()})
+
     return {
         "ok": True,
+        "path": path,
         "violations": violations,
         "violation_count": len(violations),
         "passed": len(violations) == 0,
@@ -220,25 +256,31 @@ UNITY2019_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-def check_unity2018_apis(content: str) -> dict[str, Any]:
+def check_unity2018_apis(content: str = None, path: str = None) -> dict[str, Any]:
     """
-    Scan C# content for Unity 2019+ patterns that are invalid in Unity 2018.2.
-    Returns list of violations with line numbers.
+    Scan C# content for Unity 2019+ patterns invalid in Unity 2018.2.
+    Accepts either content (string) or path (file path) as argument.
     """
+    if content and not path and (content.endswith(".cs") or "\n" not in content.strip()):
+        path, content = content.strip(), None
+    if content is None and path is not None:
+        try:
+            content = _safe_path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return {"ok": False, "violations": [], "violation_count": 0, "passed": False, "error": str(e)}
+    if content is None:
+        return {"ok": False, "violations": [], "violation_count": 0, "passed": False, "error": "No content or path provided"}
+
     violations = []
-    for i, line in enumerate(content.splitlines(), 1):
-        if line.strip().startswith("//"):
-            continue
-        for pattern, description in UNITY2019_PATTERNS:
+    lines = content.splitlines()
+    for i, line in enumerate(lines, 1):
+        for pattern, desc in UNITY2019_PATTERNS:
             if re.search(pattern, line):
-                violations.append({
-                    "line": i,
-                    "text": line.strip(),
-                    "violation": description,
-                    "pattern": pattern,
-                })
+                violations.append({"line": i, "violation": desc, "text": line.strip()})
+
     return {
         "ok": True,
+        "path": path,
         "violations": violations,
         "violation_count": len(violations),
         "passed": len(violations) == 0,
@@ -369,11 +411,12 @@ def _parse_unity_scene(content: str, path: str) -> dict[str, Any]:
     cleaned = re.sub(r'%TAG.*\n', '', cleaned)
     cleaned = re.sub(r'!u![0-9]+ &[0-9]+\n', '', cleaned)
 
-    try:
-        docs = list(yaml.safe_load_all(cleaned))
-    except yaml.YAMLError:
-        # Fallback: extract GameObjects manually
-        docs = []
+    docs = []
+    if HAS_YAML:
+        try:
+            docs = list(yaml.safe_load_all(cleaned))
+        except Exception:
+            docs = []
 
     game_objects = []
     missing_scripts = []
