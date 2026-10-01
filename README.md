@@ -143,4 +143,4 @@ python3 main.py "scaffold a 2D kinematic player controller in GDScript"
 | `status` | Check local `llama-server` connection status |
 | `history` | Display recent session traces from SQLite |
 | `clear` | Clear terminal screen and redraw banner |
-| `quit` | `exit` | Exit the CLI |
+| `quit` `exit` | Exit the CLI |
