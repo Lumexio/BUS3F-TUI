@@ -1,16 +1,16 @@
 # BUS3F-TUI — 100% Offline, Air-Gapped Local Multi-Agent Coding Harness
 
-An off-the-grid, privacy-first local multi-agent harness and interactive curses TUI (`bus3f-tui`) for software engineering and game development workflows: automated code edits, AST-level API reviews, bug fixes, architecture explanations, and Godot 3.5 to Unity 2018.2 migrations.
+An off-the-grid, privacy-first local multi-agent harness and interactive curses TUI (`bus3f-tui`) for software engineering: automated code creation and edits across any language or stack, on-the-fly multi-developer team synthesis, AST reviews, bug fixing, architecture explanations, and decoupled engine specializations.
 
 ---
 
 ## Core Pillars
 
 1. **Zero Telemetry & External APIs**: 100% local inference against GGUF models via `llama-server`. No telemetry, analytics, tracking, or cloud dependencies.
-2. **Multi-Agent Execution**: Sequential and concurrent ReAct teams (`/mode parallel|sequential` and `/team`) with strict GBNF grammar-constrained routing (`router.gbnf`).
+2. **Dynamic Team Synthesis**: Given an open-ended project goal (e.g. full-stack SaaS with React frontend and FastAPI backend), the harness dynamically purposes a team of developer specialists (frontend, backend, QA, devops) on the fly, running in sequential pipeline or concurrent modes (`/mode parallel|sequential` and `/team`).
 3. **Process-Isolated Sandbox**: Native C Tree-sitter semantic lexers and custom grammar plugins run in a separate child process via `multiprocessing.Pipe` with a 500ms watchdog timeout and crash recovery.
 4. **Full Local Persistence**: Checkpoints, execution traces, sessions, and project memory stored strictly on-disk via SQLite (`~/agent_team/traces.db`) and markdown (`MEMORY.md`).
-5. **Zero-Configuration Auto-Detection**: Automatically detects active projects and engines (Godot 3.5 or Unity 2018.2) directly from the current working directory (`Path.cwd()`).
+5. **Zero-Configuration Auto-Detection**: Automatically detects active projects and codebases directly from the current working directory (`Path.cwd()`).
 
 ---
 
@@ -27,13 +27,13 @@ An off-the-grid, privacy-first local multi-agent harness and interactive curses 
 │   ├── loop.py            # Bounded ReAct loop (MAX_STEPS, checkpoints, tools)
 │   └── db.py              # SQLite session & trace persistence (traces.db)
 ├── agents/
-│   └── profiles.py        # Profiles (godot, unity, asset, build, general)
+│   └── profiles.py        # Universal profiles (coder, reviewer, debugger, general) & custom loader
 ├── tools/
-│   └── gamedev_tools.py   # Path-safe tools, dry-run writes, API validators
+│   └── gamedev_tools.py   # Path-safe file operations, dry-run writes, log greppers
 ├── grammars/
 │   └── router.gbnf        # GBNF grammar enforcing strict JSON router output
 └── scripts/
-    └── launch_server.sh   # llama-server launcher with CUDA, nproc threading & multi-slot
+    └── launch_server.sh   # llama-server launcher with CUDA, core detection & multi-slot
 ```
 
 ---
@@ -48,15 +48,17 @@ bash setup.sh
 source ~/.bashrc
 ```
 
-### 2. Start Local LLM Server
-Launches `llama-server` with dynamic core detection (`nproc`), KV cache optimization (`q8_0`), and multi-slot execution (`-np 2`):
+### 2. Local LLM Server & Auto-Start
+`setup.sh` and the `bus3f-tui` launcher automatically start and monitor `llama-server` in the background. You can also launch it manually with custom models:
 
 ```bash
 bash scripts/launch_server.sh &
+# Or specify a model directly:
+bash scripts/launch_server.sh DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf &
 ```
 
 *Optional Environment Overrides:*
-- `LLAMA_THREADS`: Force CPU thread count (default: auto-detected via `nproc`).
+- `LLAMA_THREADS`: Force CPU thread count (default: auto-detected via CPU cores).
 - `LLAMA_PORT`: Server port (default: `8080`).
 - `LLM_URL`: Custom OpenAI-compatible endpoint (default: `http://localhost:8080/v1/chat/completions`).
 
@@ -67,15 +69,15 @@ Navigate to any project directory and launch:
 cd /path/to/your/project
 bus3f-tui
 ```
-*Prompt dynamically auto-detects the engine:*  
-`[my_project · godot · sequential · s-624b28aa · ponytail] >`
+*Prompt dynamically displays project context:*  
+`[my_project · coder · sequential · s-624b28aa · ponytail] >`
 
 ### 4. Headless Single-Task Execution (`main.py`)
 Run tasks directly without entering interactive mode:
 
 ```bash
-python3 main.py "review scripts/Player.gd"
-python3 main.py "scaffold a 2D kinematic player controller in GDScript"
+python3 main.py "review src/auth.py for edge cases"
+python3 main.py "scaffold a rate limiter middleware"
 ```
 
 ---
@@ -107,11 +109,14 @@ python3 main.py "scaffold a 2D kinematic player controller in GDScript"
 - **HuggingFace Scraping**: Search HuggingFace directly from the CLI via `/search-model <query>` and download with automatic quantization selection.
 - **Custom Agents & Plugins**: Create new specialist agents interactively (`/new-agent`) or load git plugins (`plugin install <url>`).
 
-### 6. Engine Invariant Enforcement & Migration
-- **Godot 3.5 GDScript**: Enforces 4-wide tabs, `export var`, `onready var`, `yield()`, `connect()`, `KinematicBody2D`, and pre-Godot-4 APIs.
-- **Unity 2018.2 C#**: Enforces Allman brace style, `[SerializeField] private`, classic `Input`, coroutines, and Unity 2018.2 API constraints.
-- **Static API Scanners**: Zero-token instant rule checks via `scan`, `scan godot`, or `scan unity`.
-- **Migration Wizard**: Automated step-by-step conversion of Godot scripts to Unity C# with `migrate`.
+### 6. Universal Specialist Profiles & Dynamic Custom Agents
+- **Universal Specialist Profiles**:
+  - `coder`: Code implementation, file editing, and dry-run code changes.
+  - `reviewer`: Read-only security auditing, bug reviews, and pattern inspection.
+  - `debugger`: Log inspection, crash diagnosis, and error trace grepping.
+  - `general`: Architecture planning, task breakdowns, and multi-stack orchestration.
+- **Dynamic Custom Agents**: Create new specialist agents interactively via `/new-agent` or drop JSON definitions into `~/agent_team/custom_agents/*.json`.
+- **Backward-Compatible Engine Aliases**: Legacy engine tags (`godot`, `unity`, `asset`, `build`) map transparently to universal profiles.
 
 ---
 
@@ -126,21 +131,22 @@ python3 main.py "scaffold a 2D kinematic player controller in GDScript"
 | `/branch [name]` | Branch conversation from the active session |
 | `/delete <id>` | Delete a session and its trace history |
 | `/mode [parallel\|sequential]` | Toggle concurrent vs pipeline agent execution |
-| `/team [agents] <task>` | Run multi-agent team task |
+| `/team [agents] <task>` | Run multi-agent team task concurrently or sequentially |
 | `/grammar [module\|reset]` | Set isolated Tree-sitter grammar plugin |
 | `/models` | List installed GGUF models in `~/models` |
+| `/model switch <name>` | Switch active model and hot-swap background server |
 | `/new-model [url]` | Download and install a GGUF model |
 | `/search-model <query>` | Search HuggingFace for GGUFs and install |
 | `/agents` | List built-in and custom specialist agents |
 | `/new-agent` | Interactive wizard to create a new agent |
+| `plugins` | List loaded tool plugins and skills |
+| `plugin install <url>` | Install plugin from local path or URL |
 | `/ponytail` | Toggle lazy developer mode (minimal diffs, zero bloat) |
 | `init` | Scrape active project into `MEMORY.md` |
 | `project [path]` | View or set active project directory |
 | `remember <note>` | Append a note to project `MEMORY.md` |
 | `memory` | Display current project `MEMORY.md` |
-| `scan [godot\|unity]` | Scan scripts for version violations |
-| `migrate` | Run Godot-to-Unity migration wizard |
 | `status` | Check local `llama-server` connection status |
 | `history` | Display recent session traces from SQLite |
 | `clear` | Clear terminal screen and redraw banner |
-| `quit` `exit` | Exit the CLI |
+| `quit` | Exit the CLI |

@@ -16,7 +16,6 @@ from harness.db import (
     init_db, list_sessions, get_session, create_session, delete_session, branch_session
 )
 from agents.profiles import AGENT_PROFILES
-from tools.gamedev_tools import check_godot35_apis, check_unity2018_apis
 
 try:
     import readline
@@ -157,9 +156,10 @@ def load_config() -> dict:
         has_gd = (cwd / "project.godot").exists() or any(cwd.glob("*.gd"))
         has_cs = (cwd / "Assets").exists() or any(cwd.glob("*.cs"))
         cfg["project"] = str(cwd)
-        cfg["engine"] = "godot" if has_gd else "unity" if has_cs else "general"
+        cfg["engine"] = "godot" if has_gd else "unity" if has_cs else "coder"
 
-    cfg.setdefault("engine", "general")
+    if cfg.get("engine") in ("general", None):
+        cfg["engine"] = "coder"
     cfg.setdefault("exec_mode", "sequential")
     return cfg
 
@@ -539,6 +539,35 @@ def install_plugin(target: str):
 # ── Local Models ──────────────────────────────────────────────────────────────
 MODELS_DIR = Path.home() / "models"
 
+def check_models_available() -> bool:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    return bool(list(MODELS_DIR.glob("*.gguf")))
+
+def _restart_server_with_model(model_name: str = "") -> bool:
+    import subprocess
+    import urllib.request
+    subprocess.run(["pkill", "-f", "llama-server"], check=False)
+    time.sleep(0.5)
+    launcher = Path(__file__).parent / "scripts" / "launch_server.sh"
+    if launcher.exists():
+        args = ["bash", str(launcher)]
+        if model_name:
+            args.append(model_name)
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print(f"  → Starting llama-server with {model_name or 'model'}…")
+        for _ in range(15):
+            time.sleep(1)
+            try:
+                with urllib.request.urlopen("http://localhost:8080/health", timeout=1) as resp:
+                    if resp.status == 200:
+                        print(f"  {C.GREEN}✓{C.RESET} llama-server is ready on :8080!\n")
+                        return True
+            except Exception:
+                pass
+        print(f"  {C.YELLOW}●{C.RESET} llama-server started in background. Check with: status\n")
+        return True
+    return False
+
 MODEL_PRESETS = {
     "1": ("qwen2.5-coder-7b-instruct-q4_k_m.gguf", "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf", "Qwen2.5-Coder-7B (4.7 GB, recommended)"),
     "2": ("qwen2.5-coder-3b-instruct-q4_k_m.gguf", "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf", "Qwen2.5-Coder-3B (2.0 GB, lightweight)"),
@@ -593,7 +622,7 @@ def switch_model(target: str = ""):
     cfg["active_model"] = selected.name
     save_config(cfg)
     print(f"\n  {C.GREEN}✓{C.RESET} Active model set to {C.BOLD}{selected.name}{C.RESET}")
-    print(f"    {C.DIM}Restart llama-server to apply: bash ~/agent_team/scripts/launch_server.sh &{C.RESET}\n")
+    _restart_server_with_model(selected.name)
 
 def add_model(target: str = "", custom_name: str = ""):
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -642,6 +671,7 @@ def add_model(target: str = "", custom_name: str = ""):
             cfg = load_config()
             cfg["active_model"] = name
             save_config(cfg)
+            _restart_server_with_model(name)
         else:
             if dest.exists() and dest.stat().st_size == 0:
                 dest.unlink()
@@ -657,6 +687,7 @@ def add_model(target: str = "", custom_name: str = ""):
         cfg = load_config()
         cfg["active_model"] = name
         save_config(cfg)
+        _restart_server_with_model(name)
 
 def search_and_install_model(query: str):
     """Query HuggingFace models API for GGUFs matching query and present interactive selection."""
@@ -746,23 +777,23 @@ def create_agent_wizard():
 
     print("\n  Architecture role:")
     print("  1) Standalone specialist (routes directly based on keywords)")
-    print("  2) Sub-agent helper to Unity (assists unity tasks)")
-    print("  3) Sub-agent helper to Godot (assists godot tasks)")
+    print("  2) Sub-agent helper to Coder (assists coding tasks)")
+    print("  3) Sub-agent helper to Debugger / Reviewer")
     choice = input("  Choose role [1-3, default 1]: ").strip()
-    parent = "unity" if choice == "2" else "godot" if choice == "3" else None
+    parent = "coder" if choice == "2" else "debugger" if choice == "3" else None
 
     purpose = input("\n  Agent purpose / focus: ").strip()
-    keywords_raw = input("  Trigger keywords (comma-separated, e.g. 'shader,hlsl,material'): ").strip()
+    keywords_raw = input("  Trigger keywords (comma-separated, e.g. 'fastapi,pytest,sql'): ").strip()
     keywords = [k.strip().lower() for k in keywords_raw.split(",") if k.strip()]
 
     import harness.loop as loop_mod
     all_tools = list(loop_mod.TOOL_REGISTRY.keys())
     print(f"\n  Available tools: {', '.join(all_tools)}")
-    tools_raw = input("  Tools to grant (comma-separated, default: read_file,list_dir): ").strip()
-    tools = [t.strip() for t in tools_raw.split(",") if t.strip() in all_tools] or ["read_file", "list_dir"]
+    tools_raw = input("  Tools to grant (comma-separated, default: read_file,write_file_dry,list_dir): ").strip()
+    tools = [t.strip() for t in tools_raw.split(",") if t.strip() in all_tools] or ["read_file", "write_file_dry", "list_dir"]
 
     parent_note = f" You act as a specialized sub-agent assisting {parent}." if parent else ""
-    system_prompt = f"""You are {name}, a specialist game development AI agent.{parent_note}
+    system_prompt = f"""You are {name}, a specialist AI software engineering agent.{parent_note}
 Purpose: {purpose}
 
 Respond in ReAct format:
@@ -795,9 +826,6 @@ Final Answer: <your response>"""
         print(f"    Role:  Standalone (keywords: {', '.join(keywords)})")
     print()
 
-GODOT_SCRIPTS = Path("/mnt/c/Users/Piaczo/Documents/Projects/Personal/game-dev-main/slide-x/scripts")
-UNITY_SCRIPTS = Path("/mnt/c/Users/Piaczo/Documents/Projects/Personal/game-dev-main/NONNULL/Assets")
-
 # ── Command Autocompletion & Readline Suggestions ─────────────────────────────
 COMMANDS_HELP: dict[str, str] = {
     "/help": "show built-in commands and usage",
@@ -823,8 +851,6 @@ COMMANDS_HELP: dict[str, str] = {
     "memory": "display active project MEMORY.md",
     "plugins": "list loaded tool plugins and skills",
     "plugin install": "install plugin from GitHub URL or local path",
-    "scan": "scan project files for Godot 3.5 / Unity 2018.2 violations",
-    "migrate": "convert slide-x GDScript files to NONNULL C#",
     "status": "check local llama-server connection status",
     "history": "view recent task history from traces.db",
     "clear": "clear the terminal screen",
@@ -1347,15 +1373,74 @@ def print_result_ok(text: str):
 def print_result_err(text: str):
     print(f"  {C.RED}✗{C.RESET}  {C.DIM}{text[:80]}{C.RESET}")
 
+def highlight_code(code: str, lang: str = "") -> str:
+    """Syntax highlight code block using Pygments Monokai formatter."""
+    if not HAS_PYGMENTS:
+        return code
+    try:
+        from pygments import highlight
+        from pygments.lexers import get_lexer_by_name, guess_lexer
+        from pygments.formatters import Terminal256Formatter
+        lexer = None
+        if lang:
+            try:
+                lexer = get_lexer_by_name(lang.strip().lower())
+            except Exception:
+                lexer = None
+        if not lexer:
+            try:
+                lexer = guess_lexer(code)
+            except Exception:
+                lexer = None
+        if lexer:
+            res = highlight(code, lexer, Terminal256Formatter(style="monokai"))
+            return res.rstrip("\n")
+    except Exception:
+        pass
+    return code
+
 def print_final(agent: str, text: str, steps: int, elapsed: float):
     rule()
     print(f"\n  {C.GREEN}{C.BOLD}●{C.RESET}  {C.BOLD}{agent}{C.RESET}  {C.DIM}{steps} step{'s' if steps!=1 else ''} · {elapsed:.1f}s{C.RESET}\n")
-    # Word-wrap the final answer at 72 chars
-    for para in text.split("\n"):
-        if not para.strip():
+    in_code = False
+    code_lines = []
+    code_lang = ""
+
+    def flush_code():
+        nonlocal code_lines, code_lang
+        if not code_lines:
+            return
+        code_str = "\n".join(code_lines)
+        highlighted = highlight_code(code_str, code_lang)
+        for cl in highlighted.splitlines():
+            print(f"  {cl}")
+        code_lines = []
+        code_lang = ""
+
+    for raw_line in text.split("\n"):
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+                print(f"  {C.DIM}{raw_line}{C.RESET}")
+            else:
+                in_code = True
+                code_lang = stripped[3:].strip()
+                code_lines = []
+                print(f"  {C.DIM}{raw_line}{C.RESET}")
+            continue
+
+        if in_code:
+            code_lines.append(raw_line)
+            continue
+
+        if not stripped:
             print()
             continue
-        words = para.split()
+
+        # Word-wrap regular prose at 74 chars
+        words = raw_line.split()
         line = "  "
         for word in words:
             if len(line) + len(word) + 1 > 74:
@@ -1365,6 +1450,9 @@ def print_final(agent: str, text: str, steps: int, elapsed: float):
                 line += (" " if line != "  " else "") + word
         if line.strip():
             print(line)
+
+    if in_code:
+        flush_code()
     print()
 
 def print_fail(reason: str, steps: int):
@@ -1379,188 +1467,42 @@ def check_server() -> bool:
     except Exception:
         return False
 
-# ── Scan command ──────────────────────────────────────────────────────────────
-def run_scan(engine: str = ""):
-    cfg = load_config()
-    active_root = Path(cfg["project"]) if cfg.get("project") else None
-    active_engine = cfg.get("engine", "general")
-
-    if not engine:
-        engine = active_engine if active_engine in ("godot", "unity") else "unity"
-
-    if engine == "godot":
-        root = active_root if (active_root and active_engine == "godot") else GODOT_SCRIPTS
-        files = list(root.rglob("*.gd")) if root.exists() else []
-        checker = check_godot35_apis
-        label = f"Godot 3.5 ({root.name})"
-    else:
-        root = active_root if (active_root and active_engine == "unity") else (UNITY_SCRIPTS / "Scripts" if (UNITY_SCRIPTS / "Scripts").exists() else UNITY_SCRIPTS)
-        files = list(root.rglob("*.cs")) if root.exists() else []
-        checker = check_unity2018_apis
-        label = f"Unity 2018.2 ({root.name})"
-
-    if not files:
-        print(f"\n  {C.YELLOW}No files found in {root}.{C.RESET}\n")
-        return
-
-    rule(f"scan · {label}")
-    total = 0
-    dirty = []
-
-    for f in sorted(files):
-        try:
-            result = checker(f.read_text(encoding="utf-8", errors="replace"))
-            if result["passed"]:
-                print(f"  {C.GREEN}✓{C.RESET}  {f.name}")
-            else:
-                c = result["violation_count"]
-                total += c
-                dirty.append((f, result["violations"]))
-                print(f"  {C.RED}✗{C.RESET}  {f.name}  {C.DIM}{c} violation{'s' if c!=1 else ''}{C.RESET}")
-        except Exception as e:
-            print(f"  {C.YELLOW}?{C.RESET}  {f.name}  {C.DIM}{e}{C.RESET}")
-
-    rule()
-    if total == 0:
-        print(f"\n  {C.GREEN}{C.BOLD}All {len(files)} files clean.{C.RESET}\n")
-    else:
-        print(f"\n  {C.RED}{C.BOLD}{total} violation(s) in {len(dirty)} file(s){C.RESET}\n")
-        for f, violations in dirty:
-            print(f"  {C.YELLOW}{f.name}{C.RESET}")
-            for v in violations[:4]:
-                print(f"    {C.DIM}L{v['line']:4d}  {v['violation']}{C.RESET}")
-            if len(violations) > 4:
-                print(f"    {C.DIM}… +{len(violations)-4} more{C.RESET}")
-        print()
-
-
-
-def run_migration():
-    """Guided migration from slide-x (Godot) to NONNULL (Unity)."""
-    rule("migration · Godot → Unity")
-
-    gd_files = sorted(GODOT_SCRIPTS.rglob("*.gd"))
-    cs_out = UNITY_SCRIPTS / "Scripts"
-
-    print(f"\n  {C.BOLD}Found {len(gd_files)} GDScript files to migrate{C.RESET}\n")
-    for f in gd_files:
-        print(f"  {C.DIM}{f.relative_to(GODOT_SCRIPTS)}{C.RESET}")
-
-    print(f"\n  {C.YELLOW}This will generate Unity C# equivalents for each file.{C.RESET}")
-    print(f"  Output → {cs_out}\n")
-    confirm = input(f"  Proceed file by file? [y/N] ").strip().lower()
-    if confirm != "y":
-        print(f"  {C.DIM}Cancelled.{C.RESET}\n")
-        return
-
-    for gd_file in gd_files:
-        name = gd_file.stem
-        content = gd_file.read_text(encoding="utf-8", errors="replace")
-
-        rule(f"{gd_file.name}")
-        print()
-
-        task = (
-            f"You are converting a Godot 3.5 GDScript file to Unity 2018.2 C#.\n"
-            f"Source: {gd_file.name}\n\n"
-
-            f"CONVERSION RULES:\n"
-            f"1. extends KinematicBody2D → MonoBehaviour on a GameObject with Rigidbody2D\n"
-            f"2. extends Spatial → MonoBehaviour (3D, use Transform)\n"
-            f"3. extends Node → MonoBehaviour\n"
-            f"4. _ready() → void Start()\n"
-            f"5. _process(delta) → void Update()\n"
-            f"6. _physics_process(delta) → void FixedUpdate()\n"
-            f"7. _input(event) → void Update() with Input.GetKey / Input.GetAxis\n"
-            f"8. export var → [SerializeField] private with matching type\n"
-            f"9. onready var → private field, assigned in Start() via GetComponent<T>()\n"
-            f"10. yield(signal) → StartCoroutine() with IEnumerator\n"
-            f"11. emit_signal() → C# event invoke or UnityEvent.Invoke()\n"
-            f"12. connect(signal, self, method) → C# event subscription in Start()\n"
-            f"13. get_node('X') / $X → GetComponentInChildren<T>() or serialized field\n"
-            f"14. move_and_slide(vel) → rigidbody.velocity = vel (2D) or CharacterController.Move()\n"
-            f"15. Input.is_action_pressed('ui_right') → Input.GetAxis('Horizontal') > 0\n"
-            f"16. rand_range(a,b) → Random.Range(a,b)\n"
-            f"17. OS.get_ticks_msec() → Time.time * 1000\n"
-            f"18. Tween → use Coroutine with Mathf.Lerp\n"
-            f"19. AnimationPlayer.play() → GetComponent<Animator>().Play()\n"
-            f"20. preload('res://x.gd') → [SerializeField] prefab reference\n\n"
-
-            f"OUTPUT FORMAT:\n"
-            f"- One complete .cs file\n"
-            f"- Allman brace style (braces on new line)\n"
-            f"- [SerializeField] private for all inspector fields\n"
-            f"- PascalCase methods, camelCase fields\n"
-            f"- No async/await — use Coroutines\n"
-            f"- Old Input system only\n"
-            f"- Add a comment on any line where manual Unity editor setup is required: // TODO: wire in Inspector\n"
-            f"- Add a comment where scene hierarchy must be built manually: // TODO: create GameObject hierarchy\n"
-            f"- Add a comment where an Animator state machine is needed: // TODO: create Animator controller\n\n"
-
-            f"IMPORTANT: Do not skip logic. Convert everything in the source file.\n"
-            f"If something has no direct Unity equivalent, implement the closest "
-            f"approximation and mark it // MANUAL REVIEW\n\n"
-
-            f"--- SOURCE ---\n{content[:3000]}\n--- END SOURCE ---\n\n"
-            f"Output the complete C# file. Nothing before or after it."
-        )
-
-        profile = AGENT_PROFILES["unity"]
-        route_result = route(f"scaffold unity cs from {gd_file.name}")
-
-        with Spinner(f"converting {gd_file.name}…"):
-            result = run_agent(
-                session_id=route_result["session_id"],
-                system_prompt=profile["system_prompt"],
-                task=task,
-                agent_name=profile["name"],
-                tool_whitelist=profile["tool_whitelist"],
-                grammar_path=None,
-            )
-
-        if result["ok"]:
-            out_path = cs_out / f"{name}.cs"
-            print(f"  {C.GREEN}✓{C.RESET}  Generated {name}.cs")
-            print(f"\n  {C.DIM}--- preview (first 10 lines) ---{C.RESET}")
-            for line in result["result"].splitlines()[:10]:
-                print(f"  {line}")
-            print(f"  {C.DIM}...\n{C.RESET}")
-
-            save = input(f"  Save to {out_path.name}? [y/N] ").strip().lower()
-            if save == "y":
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(result["result"], encoding="utf-8")
-                print(f"  {C.GREEN}Saved → {out_path}{C.RESET}\n")
-            else:
-                print(f"  {C.DIM}Skipped.{C.RESET}\n")
-        else:
-            print(f"  {C.RED}✗{C.RESET}  Failed: {result['result'][:80]}\n")
-            skip = input("  Skip and continue? [Y/n] ").strip().lower()
-            if skip == "n":
-                break
-
-
 def _build_inventory(engine: str) -> str:
     """Build a compact file inventory to inject into the prompt."""
     cfg = load_config()
     active_root = Path(cfg["project"]) if cfg.get("project") else None
-    active_engine = cfg.get("engine", "general")
+    if not active_root or not active_root.exists():
+        return ""
+    root = active_root
 
-    if engine in ("godot", "general"):
-        root = active_root if (active_root and active_engine == "godot") else GODOT_SCRIPTS
-        ext = "*.gd"
+    if engine == "godot":
+        exts = ["*.gd"]
         label = f"{root.name} (Godot 3.5)"
     elif engine == "unity":
-        root = active_root if (active_root and active_engine == "unity") else (UNITY_SCRIPTS / "Scripts" if (UNITY_SCRIPTS / "Scripts").exists() else UNITY_SCRIPTS)
-        ext = "*.cs"
+        if (root / "Assets" / "Scripts").exists():
+            root = root / "Assets" / "Scripts"
+        elif (root / "Scripts").exists():
+            root = root / "Scripts"
+        exts = ["*.cs"]
         label = f"{root.name} (Unity 2018.2)"
     else:
-        return ""
+        exts = ["*.py", "*.ts", "*.js", "*.rs", "*.go", "*.cs", "*.gd", "*.cpp", "*.c", "*.h"]
+        label = f"{root.name} (coder)"
 
     if not root.exists():
         return ""
 
-    files = list(root.rglob(ext))[:30]
+    files = []
+    ignored = {".git", "node_modules", "target", "build", "dist", ".venv", "venv", "Library", "obj", "bin"}
+    for ext in exts:
+        for f in root.rglob(ext):
+            if not any(x in f.parts for x in ignored):
+                files.append(f)
+            if len(files) >= 30:
+                break
+        if len(files) >= 30:
+            break
+
     if not files:
         return ""
 
@@ -1575,35 +1517,15 @@ def _build_inventory(engine: str) -> str:
     return "\n".join(lines)
 
 
-LAST_CHAT_STATE = {"reply": ""}
-
 def quick_reply(text: str) -> str | None:
     """Fast deterministic response for greetings, small talk, and meta-questions (0ms, 0 tokens)."""
-    global LAST_CHAT_STATE
     clean = re.sub(r"[^\w\s]", "", text.strip().lower())
     if not clean:
         return None
     words = clean.split()
     actions = {"fix", "create", "scaffold", "make", "write", "check", "review", "audit", "explain", "debug", "test", "run", "convert", "code", "script"}
-    if any(w in actions for w in words) or any(ext in text.lower() for ext in (".gd", ".cs", ".tscn", ".unity", ".py", ".json", ".log")):
-        LAST_CHAT_STATE["reply"] = ""
+    if any(w in actions for w in words) or any(ext in text.lower() for ext in (".py", ".ts", ".js", ".rs", ".go", ".cs", ".gd", ".json", ".log", ".md")):
         return None
-
-    # Knock-knock joke dialogue state machine
-    if clean in ("knock knock", "knock knock joke"):
-        LAST_CHAT_STATE["reply"] = "Who's there?"
-        return "Who's there?"
-
-    if LAST_CHAT_STATE.get("reply") == "Who's there?":
-        reply = f"{text.strip()} who?"
-        LAST_CHAT_STATE["reply"] = reply
-        return reply
-
-    if LAST_CHAT_STATE.get("reply", "").endswith(" who?"):
-        LAST_CHAT_STATE["reply"] = ""
-        return "😄 Good one! What can I help you build or fix in your project?"
-
-    LAST_CHAT_STATE["reply"] = ""
 
     # Common short replies / affirmations
     SHORT_CHAT = {
@@ -1636,78 +1558,192 @@ def quick_reply(text: str) -> str | None:
 
     return None
 
+def synthesize_team(task_prompt: str) -> list[dict]:
+    """Dynamically synthesize 2-3 specialist developer roles from user goal (0 hardcoded frameworks)."""
+    from harness.loop import call_llm
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an engineering lead. Given the user's project request, identify 2 to 3 specialized "
+                "developer roles to execute it (e.g. frontend, backend, testing, devops).\n"
+                "Output ONLY a valid JSON array of objects:\n"
+                '[{"name": "<role-name>", "focus": "<brief responsibilities>", "prompt": "<specialized system prompt>"}]'
+            ),
+        },
+        {"role": "user", "content": task_prompt},
+    ]
+    try:
+        with Spinner("synthesizing developer team…"):
+            res = call_llm(messages, temperature=0.2)
+        raw = res.get("content", "")
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if m:
+            roles = json.loads(m.group(0))
+            if isinstance(roles, list) and len(roles) >= 2:
+                team = []
+                for r in roles[:3]:
+                    name = re.sub(r"[^\w-]", "", r.get("name", "dev").lower().replace(" ", "-"))
+                    sys_p = (
+                        f"You are {r.get('name', 'Developer')}, an expert software engineer specialized in: {r.get('focus', 'coding')}.\n"
+                        f"{r.get('prompt', '')}\n\n"
+                        "Respond in ReAct format:\n"
+                        "Thought: <reasoning>\n"
+                        "Action: <tool_name>\n"
+                        "Args: <json args>\n"
+                        "OR\n"
+                        "Final Answer: <your output and summary of files created/inspected>"
+                    )
+                    team.append({
+                        "key": name,
+                        "name": r.get("name", name),
+                        "focus": r.get("focus", ""),
+                        "system_prompt": sys_p,
+                        "tool_whitelist": ["read_file", "write_file_dry", "list_dir", "grep_file"],
+                    })
+                return team
+    except Exception:
+        pass
+
+    # Deterministic fallback when offline/model unparsed
+    return [
+        {
+            "key": "backend-architect",
+            "name": "Backend Architect",
+            "focus": "API design, data models, server endpoints",
+            "system_prompt": (
+                "You are Backend Architect. Design and implement the server, API routes, and data models.\n"
+                "Use write_file_dry to scaffold and write code. Respond in ReAct format."
+            ),
+            "tool_whitelist": ["read_file", "write_file_dry", "list_dir", "grep_file"],
+        },
+        {
+            "key": "frontend-dev",
+            "name": "Frontend Developer",
+            "focus": "Client UI components, state management, API integration",
+            "system_prompt": (
+                "You are Frontend Developer. Build the client application UI, pages, and API fetchers based on the backend.\n"
+                "Use write_file_dry to scaffold and write code. Respond in ReAct format."
+            ),
+            "tool_whitelist": ["read_file", "write_file_dry", "list_dir", "grep_file"],
+        },
+        {
+            "key": "qa-reviewer",
+            "name": "QA & Test Engineer",
+            "focus": "Automated tests, edge cases, integration verification",
+            "system_prompt": (
+                "You are QA & Test Engineer. Write unit/integration tests and verify endpoints and edge cases.\n"
+                "Use write_file_dry to write test code. Respond in ReAct format."
+            ),
+            "tool_whitelist": ["read_file", "write_file_dry", "list_dir", "grep_file"],
+        },
+    ]
+
+
 def run_team(raw_args: str):
     """Run multi-agent task either sequentially or concurrently via ThreadPoolExecutor."""
     import concurrent.futures
-    from agents.profiles import load_custom_agents
+    from agents.profiles import AGENT_PROFILES, load_custom_agents
     load_custom_agents()
 
     cfg = load_config()
     mode = cfg.get("exec_mode", "sequential")
-    active_engine = cfg.get("engine", "unity")
 
-    parts = raw_args.strip().split(maxsplit=1)
-    if not parts or not parts[0]:
-        print(f"\n  {C.YELLOW}Usage: /team [agent1,agent2,...] <task>{C.RESET}\n")
+    if not check_models_available():
+        print(f"\n  {C.YELLOW}● No GGUF models installed.{C.RESET} Model setup is required to run tasks.\n")
+        add_model()
         return
 
-    cand_agents = [a.strip() for a in parts[0].split(",") if a.strip()]
-    if cand_agents and all(a in AGENT_PROFILES for a in cand_agents) and len(parts) > 1:
-        target_agents = cand_agents
-        task_prompt = parts[1]
-    else:
-        target_agents = [active_engine, "build"] if active_engine in AGENT_PROFILES else ["general", "build"]
-        task_prompt = raw_args.strip()
+    if not check_server():
+        print(f"\n  {C.RED}llama-server not running.{C.RESET}  Start: {C.DIM}bash ~/agent_team/scripts/launch_server.sh &{C.RESET}\n")
+        return
 
-    rule(f"team ({mode}) · {','.join(target_agents)}")
-    print(f"  {C.DIM}Task: {task_prompt}{C.RESET}\n")
+    if not raw_args.strip():
+        print(f"\n  {C.YELLOW}Usage: /team [agent1,agent2,...] <task>  OR  /team <fullstack task>{C.RESET}\n")
+        return
+
+    parts = raw_args.strip().split(maxsplit=1)
+    cand_agents = [a.strip() for a in parts[0].split(",") if a.strip()]
+    dynamic_team = []
+
+    if cand_agents and all(a in AGENT_PROFILES for a in cand_agents) and len(parts) > 1:
+        task_prompt = parts[1]
+        for a in cand_agents:
+            prof = AGENT_PROFILES[a]
+            dynamic_team.append({
+                "key": a,
+                "name": prof["name"],
+                "focus": a,
+                "system_prompt": prof["system_prompt"],
+                "tool_whitelist": prof["tool_whitelist"],
+            })
+    else:
+        task_prompt = raw_args.strip()
+        dynamic_team = synthesize_team(task_prompt)
+
+    rule(f"team ({mode}) · {len(dynamic_team)} developers")
+    print(f"  {C.DIM}Project Goal: {task_prompt}{C.RESET}")
+    print(f"  {C.CYAN}Roles:{C.RESET} " + ", ".join(f"{d['name']} ({d['focus'][:30]})" for d in dynamic_team) + "\n")
 
     active_sid = get_active_session()
-    def execute_agent(agent_key: str, prompt_text: str):
-        profile = AGENT_PROFILES[agent_key]
-        active_tools = [t for t in profile["tool_whitelist"] if not t.startswith("write_")]
-        sid = active_sid if mode != "parallel" else f"{active_sid}-{agent_key}"
+    def execute_agent(agent_meta: dict, prompt_text: str):
+        active_tools = agent_meta["tool_whitelist"]
+        sid = active_sid if mode != "parallel" else f"{active_sid}-{agent_meta['key']}"
         return run_agent(
             session_id=sid,
-            system_prompt=profile["system_prompt"],
+            system_prompt=agent_meta["system_prompt"],
             task=prompt_text,
-            agent_name=profile["name"],
+            agent_name=agent_meta["name"],
             tool_whitelist=active_tools,
         )
 
     if mode == "parallel":
-        print(f"  {C.CYAN}⚡ Running {len(target_agents)} agents in parallel (ThreadPoolExecutor)...{C.RESET}\n")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(target_agents)) as ex:
-            futures = {ex.submit(execute_agent, k, task_prompt): k for k in target_agents}
+        print(f"  {C.CYAN}⚡ Running {len(dynamic_team)} developers in parallel...{C.RESET}\n")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(dynamic_team)) as ex:
+            futures = {ex.submit(execute_agent, d, task_prompt): d for d in dynamic_team}
             for f in concurrent.futures.as_completed(futures):
-                k = futures[f]
-                prof = AGENT_PROFILES[k]
+                d = futures[f]
                 try:
                     res = f.result()
-                    rule(f"{prof['name']} (done)")
+                    rule(f"{d['name']} (done)")
                     ans = res.get("result") or res.get("final_answer") or res.get("error") or "No response"
                     print(f"\n{ans}\n")
                 except Exception as e:
-                    print(f"\n  {C.RED}✗ {prof['name']} error: {e}{C.RESET}\n")
+                    print(f"\n  {C.RED}✗ {d['name']} error: {e}{C.RESET}\n")
     else:
-        print(f"  {C.CYAN}→ Running {len(target_agents)} agents sequentially (Pipeline)...{C.RESET}\n")
+        print(f"  {C.CYAN}→ Running {len(dynamic_team)} developers sequentially in pipeline...{C.RESET}\n")
         context = ""
-        for k in target_agents:
-            prof = AGENT_PROFILES[k]
-            prompt = f"{task_prompt}\n\n[Findings from prior team member]:\n{context}" if context else task_prompt
-            rule(prof["name"])
+        for d in dynamic_team:
+            prompt = (
+                f"{task_prompt}\n\n"
+                f"Your specific role in this team: {d['name']} (Focus: {d['focus']}).\n"
+                f"[Output & Artifacts from previous team members]:\n{context}"
+                if context else
+                f"{task_prompt}\n\nYour specific role in this team: {d['name']} (Focus: {d['focus']})."
+            )
+            rule(f"{d['name']} · {d['focus']}")
             try:
-                res = execute_agent(k, prompt)
+                res = execute_agent(d, prompt)
                 ans = res.get("result") or res.get("final_answer") or res.get("error") or "No response"
                 print(f"\n{ans}\n")
-                context += f"\n[{prof['name']}]: {ans[:500]}\n"
+                context += f"\n[{d['name']} output]:\n{ans[:1200]}\n"
             except Exception as e:
-                print(f"\n  {C.RED}✗ {prof['name']} error: {e}{C.RESET}\n")
+                print(f"\n  {C.RED}✗ {d['name']} error: {e}{C.RESET}\n")
+
 
 # ── Core task runner ──────────────────────────────────────────────────────────
 def run_task(user_input: str):
     if user_input.lower().startswith(("team ", "/team ")):
         run_team(user_input.split(maxsplit=1)[1] if " " in user_input else "")
+        return
+
+    # Auto-detect full-stack or multi-role project setup requests
+    is_team_project = bool(re.search(
+        r'\b(set\s*up|build|scaffold|create)\s+(an?\s+)?(app|project|saas|application|system|stack)\b.*\b(frontend|backend|fullstack|full-stack|api|database|testing)\b',
+        user_input, re.IGNORECASE
+    ))
+    if is_team_project and not user_input.lower().startswith("single "):
+        run_team(user_input)
         return
 
     reply = quick_reply(user_input)
@@ -1754,8 +1790,8 @@ def run_task(user_input: str):
             found = list(active_root.rglob(cand.name))
             if found:
                 file_path = str(found[0].resolve())
-        if not file_path:
-            for root in [GODOT_SCRIPTS, UNITY_SCRIPTS, UNITY_SCRIPTS / "Scripts"]:
+        if not file_path and active_root and active_root.exists():
+            for root in [active_root, active_root / "Assets" / "Scripts", active_root / "scripts", active_root / "Scripts"]:
                 cand_p = root / raw.lstrip("/")
                 if cand_p.exists():
                     file_path = str(cand_p.resolve())
@@ -1774,6 +1810,15 @@ def run_task(user_input: str):
             file_path = str((default_dir / cand.name).resolve())
 
     active_sid = get_active_session()
+
+    if not check_models_available():
+        print(f"\n  {C.YELLOW}● No GGUF models installed.{C.RESET} Model setup is required to run tasks.\n")
+        add_model()
+        return
+
+    if not check_server():
+        print(f"\n  {C.RED}llama-server not running.{C.RESET}  Start: {C.DIM}bash ~/agent_team/scripts/launch_server.sh &{C.RESET}\n")
+        return
 
     # Route
     with Spinner("routing…"):
@@ -1799,25 +1844,8 @@ def run_task(user_input: str):
     elif file_path and task == "scaffold":
         print(f"  {C.DIM}target: {Path(file_path).name}{C.RESET}")
 
-    # Fast path: direct validator for review
-    if task == "review" and file_content and file_path:
-        if engine == "godot" and file_path.endswith(".gd"):
-            _show_validation(check_godot35_apis(file_content), file_path, "Godot 3.5")
-            return
-        elif engine == "unity" and file_path.endswith(".cs"):
-            _show_validation(check_unity2018_apis(file_content), file_path, "Unity 2018.2")
-            return
-
-    agent_key = engine if engine in AGENT_PROFILES else None
-    if not agent_key:
-        print(f"\n  {C.YELLOW}No specialized agent for '{engine}'. Be more specific about Godot or Unity.{C.RESET}\n")
-        return
-
-    if not check_server():
-        print(f"\n  {C.RED}llama-server not running.{C.RESET}  Start: {C.DIM}bash ~/agent_team/scripts/launch_server.sh &{C.RESET}\n")
-        return
-
-    profile = AGENT_PROFILES[agent_key]
+    agent_key = engine if engine in AGENT_PROFILES else "coder"
+    profile = AGENT_PROFILES.get(agent_key, AGENT_PROFILES["coder"])
 
     # Memory context
     mem_context = ""
@@ -1836,12 +1864,12 @@ def run_task(user_input: str):
         enriched = (
             f"{user_input}{mem_context}\n\n--- EXISTING FILE: {file_path} ---\n{file_content}\n--- END EXISTING FILE ---\n\n"
             f"Existing file content is provided above. "
-            f"Write the complete updated code and call write_cs_dry or write_gd_dry with 'path' and 'content'."
+            f"Write the complete updated code and call write_file_dry with 'path' and 'content'."
         )
     elif file_content:
         enriched = (
             f"{user_input}{mem_context}\n\nFile at {file_path} ({len(file_content)} chars) — "
-            f"use read_gd/read_cs to load it."
+            f"use read_file to load it."
         )
     elif task == "scaffold" and not file_content:
         inventory = _build_inventory(engine)
@@ -1951,19 +1979,6 @@ def run_task(user_input: str):
     else:
         print_fail(result["result"], result["steps"])
 
-def _show_validation(result: dict, file_path: str, label: str):
-    name = Path(file_path).name
-    rule(f"validate · {label}")
-    if result["passed"]:
-        print(f"\n  {C.GREEN}✓  {name}{C.RESET}  clean\n")
-    else:
-        c = result["violation_count"]
-        print(f"\n  {C.RED}✗  {name}{C.RESET}  {C.BOLD}{c} violation{'s' if c!=1 else ''}{C.RESET}\n")
-        for v in result["violations"]:
-            print(f"  {C.DIM}L{v['line']:<6}{C.RESET}{C.YELLOW}{v['violation']}{C.RESET}")
-            print(f"          {C.DIM}{v['text']}{C.RESET}")
-        print()
-
 # ── History ───────────────────────────────────────────────────────────────────
 def show_history():
     import sqlite3
@@ -2003,8 +2018,6 @@ def show_help():
   {C.CYAN}/ponytail{C.RESET}            toggle ponytail mode (minimal diffs, zero bloat)
   {C.CYAN}/mode [mode]{C.RESET}         switch multi-agent mode (parallel or sequential)
   {C.CYAN}/team [agents] <task>{C.RESET} run multi-agent task concurrently or sequentially
-  {C.CYAN}scan [engine]{C.RESET}        scan files for Godot 3.5 / Unity 2018.2 violations
-  {C.CYAN}migrate{C.RESET}              convert slide-x GDScript files to NONNULL C#
   {C.CYAN}/sessions{C.RESET}            list chat sessions
   {C.CYAN}/new [name]{C.RESET}          start clean chat session
   {C.CYAN}/resume <id>{C.RESET}         resume previous session
@@ -2018,11 +2031,10 @@ def show_help():
 
   {C.BOLD}Natural tasks{C.RESET}
   Can you install deepseek — search HuggingFace and pick a GGUF to install
-  rewrite PlayerController.cs — convert from melee brawler to third-person shooter
-  scaffold GunController.cs — attaches gun to hand bone
-  review scripts/player.gd for Godot 3.5 issues
-  fix enemy AI not chasing player
-  explain FlockManager.gd
+  team backend, frontend build a fullstack auth system
+  review src/auth.py for edge cases and security issues
+  fix memory leak in worker pool
+  explain architecture of this repository
 """)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -2094,7 +2106,22 @@ def main():
         setup_readline()
     banner()
 
+    if not check_models_available():
+        print(f"  {C.YELLOW}● No GGUF models found in {MODELS_DIR}.{C.RESET}")
+        print(f"  {C.CYAN}A model is required before you can start coding.{C.RESET}\n")
+        add_model()
+
     if check_server():
+        try:
+            import urllib.request
+            with urllib.request.urlopen("http://localhost:8080/props", timeout=1) as resp:
+                props = json.loads(resp.read().decode("utf-8"))
+                n_ctx = props.get("default_generation_settings", {}).get("n_ctx", 2048)
+                if n_ctx < 4096:
+                    print(f"  {C.YELLOW}● Upgrading llama-server context window ({n_ctx} → 8192)...{C.RESET}")
+                    _restart_server_with_model()
+        except Exception:
+            pass
         print(f"  {C.GREEN}●{C.RESET}  llama-server  {C.DIM}:8080{C.RESET}\n")
     else:
         print(f"  {C.YELLOW}●{C.RESET}  llama-server  {C.DIM}not running{C.RESET}\n")
@@ -2128,6 +2155,10 @@ def main():
                 break
             elif cmd in ("help", "/help", "/", "/?"):
                 show_help()
+            elif not check_models_available() and not (cmd.startswith(("/new-model", "new-model", "model add")) or cmd in ("/models", "models")):
+                print(f"\n  {C.YELLOW}● No model installed.{C.RESET} Please install a model first.\n")
+                add_model()
+                continue
             elif cmd in ("/sessions", "sessions", "/session", "session"):
                 list_sessions_cli()
             elif cmd.startswith(("/session new ", "session new ", "/new ", "new session ")):
@@ -2226,22 +2257,17 @@ def main():
                     print(f"\n{C.DIM}── {p.name}/MEMORY.md ────────────────────{C.RESET}\n" + mem_file.read_text(encoding="utf-8") + f"\n{C.DIM}──────────────────────────────────────────{C.RESET}\n")
                 else:
                     print(f"\n  {C.DIM}No MEMORY.md found for current project.{C.RESET}\n")
+            elif cmd in ("/restart", "restart", "/restart-server", "restart-server"):
+                print(f"\n  Restarting llama-server with updated context window...")
+                _restart_server_with_model()
             elif cmd == "status":
                 ok = check_server()
                 print(f"\n  {'✓' if ok else '✗'}  llama-server {'running' if ok else 'not running'}\n")
             elif cmd == "clear":
-                os.system("clear")
+                print("\033[H\033[2J", end="", flush=True)
                 banner()
             elif cmd == "history":
                 show_history()
-            elif cmd == "scan":
-                run_scan()
-            elif cmd == "scan godot":
-                run_scan("godot")
-            elif cmd == "scan unity":
-                run_scan("unity")
-            elif cmd == "migrate":
-                run_migration()
             else:
                 run_task(user_input)
         except KeyboardInterrupt:

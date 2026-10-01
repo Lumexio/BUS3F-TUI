@@ -2,12 +2,14 @@
 """Bounded ReAct loop with MAX_STEPS, time budget, and tool dispatch."""
 
 from __future__ import annotations
+import os
 import re
 import time
 import uuid
 import json
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any, Callable
 
 from harness.db import (
@@ -15,29 +17,22 @@ from harness.db import (
     create_session, close_session
 )
 from tools.gamedev_tools import (
-    read_gd, write_gd_dry, check_godot35_apis,
-    read_cs, write_cs_dry, check_unity2018_apis,
-    read_scene, read_log, grep_error, read_file, list_dir
+    read_file, write_file_dry, grep_file, list_dir, read_log, grep_error
 )
 
-LLM_URL = "http://localhost:8080/v1/chat/completions"
+LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 MAX_STEPS = 8
 TIME_BUDGET_SEC = 600
-APPROVAL_REQUIRED_TOOLS = {"write_gd_dry", "write_cs_dry"}
+APPROVAL_REQUIRED_TOOLS = {"write_file_dry"}
 PLUGIN_TOOLS: set[str] = set()
 
 TOOL_REGISTRY: dict[str, Callable] = {
-    "read_gd": read_gd,
-    "write_gd_dry": write_gd_dry,
-    "check_godot35_apis": check_godot35_apis,
-    "read_cs": read_cs,
-    "write_cs_dry": write_cs_dry,
-    "check_unity2018_apis": check_unity2018_apis,
-    "read_scene": read_scene,
+    "read_file": read_file,
+    "write_file_dry": write_file_dry,
+    "grep_file": grep_file,
+    "list_dir": list_dir,
     "read_log": read_log,
     "grep_error": grep_error,
-    "read_file": read_file,
-    "list_dir": list_dir,
 }
 
 
@@ -48,12 +43,14 @@ def call_llm(messages: list[dict], model: str = "qwen", temperature: float = 0.1
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": 2048,
+        "max_tokens": -1,  # -1 = dynamic tokens (generates until completion/EOS)
     }
     if grammar_path:
+        gp = Path(grammar_path)
+        if not gp.is_absolute():
+            gp = Path(__file__).parent.parent / grammar_path
         try:
-            with open(grammar_path) as f:
-                payload["grammar"] = f.read()
+            payload["grammar"] = gp.read_text(encoding="utf-8")
         except FileNotFoundError:
             pass  # Grammar file missing — degrade gracefully
 
@@ -84,21 +81,46 @@ def parse_react_step(text: str) -> dict[str, Any]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith("Thought:"):
-            result["thought"] = line[len("Thought:"):].strip()
-        elif line.startswith("Final Answer:"):
-            result["final_answer"] = line[len("Final Answer:"):].strip()
-        elif line.startswith("Action:"):
-            result["action"] = line[len("Action:"):].strip()
-        elif line.startswith("Args:"):
+        stripped = line.strip()
+
+        th_match = re.match(r'^(?:\*\*)?Thought(?:\*\*)?\s*:\s*(.*)', stripped, re.IGNORECASE)
+        fa_match = re.match(r'^(?:\*\*)?Final Answer(?:\*\*)?\s*:\s*(.*)', stripped, re.IGNORECASE)
+        ac_match = re.match(r'^(?:\*\*)?Action(?:\*\*)?\s*:\s*(.*)', stripped, re.IGNORECASE)
+        ar_match = re.match(r'^(?:\*\*)?Args(?:\*\*)?\s*:\s*(.*)', stripped, re.IGNORECASE)
+
+        if th_match:
+            raw = th_match.group(1).strip()
+            j = i + 1
+            while j < len(lines):
+                s = lines[j].strip()
+                if re.match(r'^(?:\*\*)?(Action|Args|Final Answer)(?:\*\*)?\s*:', s, re.IGNORECASE):
+                    break
+                raw += "\n" + lines[j]
+                j += 1
+            result["thought"] = raw.strip()
+            i = j - 1
+        elif fa_match:
+            raw = fa_match.group(1).strip()
+            j = i + 1
+            while j < len(lines):
+                s = lines[j].strip()
+                if re.match(r'^(?:\*\*)?(Thought|Action|Args)(?:\*\*)?\s*:', s, re.IGNORECASE):
+                    break
+                raw += "\n" + lines[j]
+                j += 1
+            result["final_answer"] = raw.strip()
+            i = j - 1
+        elif ac_match:
+            result["action"] = ac_match.group(1).strip()
+        elif ar_match:
             # Collect everything from Args: onward into one string
-            raw = line[len("Args:"):].strip()
+            raw = ar_match.group(1).strip()
             # Gather continuation lines until next section header
             j = i + 1
             while j < len(lines):
                 next_line = lines[j]
-                stripped = next_line.strip()
-                if stripped.startswith(("Thought:", "Action:", "Final Answer:")):
+                s = next_line.strip()
+                if re.match(r'^(?:\*\*)?(Thought|Action|Final Answer)(?:\*\*)?\s*:', s, re.IGNORECASE):
                     break
                 raw += "\n" + next_line
                 j += 1
@@ -207,16 +229,22 @@ def run_agent(
     checkpoint = load_checkpoint(session_id)
     if checkpoint and "messages" in checkpoint.get("state", {}):
         prior = checkpoint["state"]["messages"]
-        if len(prior) > 12:
-            prior = [prior[0]] + prior[-10:]
-        messages = prior + [
-            {"role": "user", "content": f"Task: {task}\n\nRespond in ReAct format:\nThought: <your reasoning>\nAction: <tool_name> OR\nFinal Answer: <answer>\nArgs: <json args if using a tool>"}
+        # Drop any poisoned assistant stubs that were truncated in prior sessions
+        cleaned = []
+        for m in prior:
+            if m.get("role") == "assistant" and m.get("content", "").strip().endswith(":") and len(m.get("content", "").strip()) < 80:
+                continue
+            cleaned.append(m)
+        if len(cleaned) > 6:
+            cleaned = [cleaned[0]] + cleaned[-4:]
+        messages = cleaned + [
+            {"role": "user", "content": f"Task: {task}\n\nRespond in ReAct format:\nThought: <reasoning>\nFinal Answer: <complete code and response>\nOR\nAction: <tool_name>\nArgs: {{\"path\": \"<path>\", \"content\": \"<code>\"}}"}
         ]
         start_step = 0
     else:
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Task: {task}\n\nRespond in ReAct format:\nThought: <your reasoning>\nAction: <tool_name> OR\nFinal Answer: <answer>\nArgs: <json args if using a tool>"},
+            {"role": "user", "content": f"Task: {task}\n\nRespond in ReAct format:\nThought: <reasoning>\nFinal Answer: <complete code and response>\nOR\nAction: <tool_name>\nArgs: {{\"path\": \"<path>\", \"content\": \"<code>\"}}"},
         ]
         start_step = 0
 
@@ -272,11 +300,11 @@ def run_agent(
 
             # If path/content missing from tool call, infer path from task
             if not tool_args.get("path") and not tool_args.get("content"):
-                pm = re.search(r'(/[\w./\-\\ ]+\.(?:gd|cs|tscn|unity|log|txt))', task)
+                pm = re.search(r'(/[\w./\-\\ ]+\.(?:[\w]+))', task)
                 if pm:
                     tool_args["path"] = pm.group(1).strip()
-            elif tool_name in ("write_cs_dry", "write_gd_dry", "read_cs", "read_gd") and not tool_args.get("path"):
-                pm = re.search(r'(/[\w./\-\\ ]+\.(?:gd|cs|tscn|unity|log|txt))', task)
+            elif tool_name in ("write_file_dry", "read_file", "grep_file") and not tool_args.get("path"):
+                pm = re.search(r'(/[\w./\-\\ ]+\.(?:[\w]+))', task)
                 if pm:
                     tool_args["path"] = pm.group(1).strip()
 
@@ -331,17 +359,24 @@ def run_agent(
                     "session_id": session_id,
                 }
 
-            # Append observation to message history
+            # Append observation to message history with sliding window protection
             messages.append({"role": "assistant", "content": content})
-            # Build a clear observation so the model doesn't loop on errors
             if tool_result.get("ok") is False:
                 obs = f"Observation: ERROR — {tool_result.get('error', 'unknown error')}. Fix your action and try again, or give a Final Answer if you cannot proceed."
             else:
-                obs = f"Observation: {json.dumps(tool_result)}"
+                raw_obs = json.dumps(tool_result)
+                if len(raw_obs) > 2500:
+                    raw_obs = raw_obs[:2300] + f"... [truncated {len(raw_obs) - 2300} chars]"
+                obs = f"Observation: {raw_obs}"
+
             messages.append({
                 "role": "user",
                 "content": f"{obs}\n\nContinue. Use Action/Args or give a Final Answer."
             })
+
+            # Compact message history if context window is getting full (keep system prompt, initial task, and recent steps)
+            if len(messages) > 10:
+                messages = [messages[0], messages[1]] + messages[-6:]
 
             # Save checkpoint
             save_checkpoint(session_id, step, {"messages": messages})

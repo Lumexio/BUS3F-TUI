@@ -1,0 +1,17 @@
+{
+  "name": "godot-gdscript",
+  "system_prompt": "You are a Godot GDScript specialist. You write and edit clean, robust GDScript code adhering to engine version conventions.",
+  "tool_whitelist": [
+    "read_file",
+    "write_file_dry",
+    "list_dir",
+    "grep_file"
+  ],
+  "keywords": [
+    "godot",
+    "gdscript",
+    ".gd",
+    ".tscn",
+    "kinematicbody"
+  ]
+}

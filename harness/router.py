@@ -11,31 +11,33 @@ import uuid
 import time
 from typing import Any
 
+from pathlib import Path
 from harness.loop import call_llm
 from harness.db import init_db, log_trace, create_session
 
-GRAMMAR_PATH = "grammars/router.gbnf"
+GRAMMAR_PATH = str(Path(__file__).parent.parent / "grammars" / "router.gbnf")
 
 SYSTEM_PROMPT_ROUTER = """
-You are a game-development task router. Your ONLY job is to classify the user's request and output a single JSON object. You do not write code, explain concepts, or answer questions.
+You are a software development task router. Your ONLY job is to classify the user's request and output a single JSON object. You do not write code, explain concepts, or answer questions.
 
 Output format (strict — no other text):
 {"engine": "<ENGINE>", "task": "<TASK>"}
 
-ENGINE must be exactly one of: godot, unity, asset, build, general
+ENGINE must be exactly one of: coder, reviewer, debugger, general, godot, unity
 TASK must be exactly one of: edit, review, explain, debug, scaffold
 
 Classification rules:
-- engine=godot : mentions GDScript, .gd files, .tscn, Godot, nodes, signals, export var
-- engine=unity : mentions C#, .cs files, .unity, Unity, MonoBehaviour, GameObject, Inspector
-- engine=asset : mentions textures, sprites, import settings, atlas, compression, mipmaps
-- engine=build : mentions build errors, compile errors, log files, linker errors, missing references
-- engine=general : none of the above, or ambiguous
-- task=edit    : fix, change, update, rewrite, refactor, modify
-- task=review  : check, review, audit, validate, look at, inspect
-- task=explain : explain, how does, what is, describe, walk me through
-- task=debug   : not working, broken, error, crash, fails, why is
-- task=scaffold: create, generate, new, scaffold, make me a, write from scratch
+- engine=coder    : code edits, writing features, refactoring, fixing bugs, creating new scripts
+- engine=reviewer : code audits, reviews, checking compliance, style, or syntax
+- engine=debugger : errors, crash logs, stack traces, failure diagnosis
+- engine=general  : general questions, explanations, architecture, or ambiguous queries
+- engine=godot    : explicitly targets Godot engine or GDScript
+- engine=unity    : explicitly targets Unity engine or C# MonoBehaviour
+- task=edit       : fix, change, update, rewrite, refactor, modify, implement
+- task=review     : check, review, audit, validate, inspect, lint
+- task=explain    : explain, how does, what is, describe, walk me through
+- task=debug      : not working, broken, error, crash, fails, why is
+- task=scaffold   : create, generate, new, scaffold, write from scratch
 Output ONLY the JSON. No markdown. No explanation.
 """
 
@@ -81,7 +83,7 @@ def _prefilter_route(text: str) -> dict[str, str] | None:
     elif ASSET_KEYWORDS.search(text):
         engine = "asset"
     elif BUILD_KEYWORDS.search(text):
-        engine = "build"
+        engine = "debugger"
     else:
         from agents.profiles import AGENT_PROFILES
         for key, prof in AGENT_PROFILES.items():
@@ -102,6 +104,16 @@ def _prefilter_route(text: str) -> dict[str, str] | None:
         task = "review"
     elif EXPLAIN_KEYWORDS.search(text):
         task = "explain"
+
+    if not engine and task:
+        if task in ("edit", "scaffold"):
+            engine = "coder"
+        elif task == "review":
+            engine = "reviewer"
+        elif task == "debug":
+            engine = "debugger"
+        elif task == "explain":
+            engine = "general"
 
     if engine and task:
         return {"engine": engine, "task": task}
@@ -137,23 +149,31 @@ def route(user_input: str, session_id: str | None = None) -> dict[str, Any]:
         {"role": "system", "content": SYSTEM_PROMPT_ROUTER},
         {"role": "user", "content": user_input},
     ]
-    llm_result = call_llm(messages, temperature=0.0, grammar_path=GRAMMAR_PATH)
-    elapsed = int((time.monotonic() - t0) * 1000)
-
     try:
+        llm_result = call_llm(messages, temperature=0.0, grammar_path=GRAMMAR_PATH)
+        elapsed = int((time.monotonic() - t0) * 1000)
         route_json = json.loads(llm_result["content"])
         engine = route_json.get("engine", "general")
         task = route_json.get("task", "explain")
-    except json.JSONDecodeError:
+        method = "model"
+        content_out = llm_result.get("content", "")
+        tokens_in = llm_result.get("tokens_in", 0)
+        tokens_out = llm_result.get("tokens_out", 0)
+    except Exception as e:
+        elapsed = int((time.monotonic() - t0) * 1000)
         engine = "general"
         task = "explain"
+        method = "fallback"
+        content_out = str(e)
+        tokens_in = 0
+        tokens_out = 0
 
     log_trace(
-        session_id, 0, "router", "model_route",
-        model_out=llm_result["content"],
+        session_id, 0, "router", f"{method}_route",
+        model_out=content_out,
         tool_result={"engine": engine, "task": task},
-        tokens_in=llm_result["tokens_in"],
-        tokens_out=llm_result["tokens_out"],
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
         elapsed_ms=elapsed,
     )
 
@@ -161,6 +181,6 @@ def route(user_input: str, session_id: str | None = None) -> dict[str, Any]:
         "session_id": session_id,
         "engine": engine,
         "task": task,
-        "method": "model",
+        "method": method,
         "elapsed_ms": elapsed,
     }

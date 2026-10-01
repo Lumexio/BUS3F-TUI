@@ -16,7 +16,6 @@ from agents.profiles import AGENT_PROFILES
 def run_task(user_input: str) -> None:
     import re as _re
     from pathlib import Path as _Path
-    from tools.gamedev_tools import check_godot35_apis, check_unity2018_apis
 
     init_db()
     print(f"\n[task] {user_input}")
@@ -24,7 +23,12 @@ def run_task(user_input: str) -> None:
     clean = _re.sub(r"[^\w\s]", "", user_input.strip().lower())
     words = clean.split()
     if len(words) <= 3 and words and words[0] in ("hi", "hello", "hey", "hola", "yo", "sup", "howdy", "greetings"):
-        print("[dispatch] Greeting received. Ready for game-dev tasks.")
+        print("[dispatch] Greeting received. Ready for coding tasks.")
+        return
+
+    if user_input.lower().startswith(("team ", "/team ")):
+        from cli import run_team
+        run_team(user_input.split(maxsplit=1)[1] if " " in user_input else "")
         return
 
     route_result = route(user_input)
@@ -37,7 +41,11 @@ def run_task(user_input: str) -> None:
     print(f"[dispatch] → {profile['name']}")
 
     # Extract file path from input (supports absolute, relative, and quoted paths)
-    file_match = _re.search(r'["\']([^"\']+\.(?:gd|cs|tscn|unity|log|txt))["\']|(?:^|\s)([\w.\-/\\]+\.(?:gd|cs|tscn|unity|log|txt))\b', user_input)
+    file_match = _re.search(
+        r'["\']([^"\']+\.(?:py|ts|js|rs|go|cs|gd|cpp|c|h|json|yaml|yml|toml|md|tscn|unity|log|txt))["\']|'
+        r'(?:^|\s)([\w.\-/\\]+\.(?:py|ts|js|rs|go|cs|gd|cpp|c|h|json|yaml|yml|toml|md|tscn|unity|log|txt))\b',
+        user_input
+    )
     raw_path = (file_match.group(1) or file_match.group(2)).strip() if file_match else None
     file_path = str(_Path(raw_path).resolve()) if raw_path and _Path(raw_path).exists() else raw_path
     file_content = None
@@ -48,31 +56,6 @@ def run_task(user_input: str) -> None:
             print(f"[pre-load] Loaded {file_path} ({len(file_content)} chars)")
         except Exception as e:
             print(f"[pre-load] Could not load file: {e}")
-
-    # For review tasks with a large file — run validator directly, no LLM needed
-    if task == "review" and file_content and file_path:
-        if engine == "godot" and file_path.endswith(".gd"):
-            result = check_godot35_apis(file_content)
-            print(f"\n[result] ok=True steps=0 (direct validator)")
-            if result["passed"]:
-                print(f"\n✓ No Godot 3.5 API violations found in {file_path}")
-            else:
-                print(f"\n✗ Found {result['violation_count']} violation(s) in {file_path}:\n")
-                for v in result["violations"]:
-                    print(f"  Line {v['line']:4d}: {v['violation']}")
-                    print(f"            {v['text']}")
-            return
-        elif engine == "unity" and file_path.endswith(".cs"):
-            result = check_unity2018_apis(file_content)
-            print(f"\n[result] ok=True steps=0 (direct validator)")
-            if result["passed"]:
-                print(f"\n✓ No Unity 2018.2 API violations found in {file_path}")
-            else:
-                print(f"\n✗ Found {result['violation_count']} violation(s) in {file_path}:\n")
-                for v in result["violations"]:
-                    print(f"  Line {v['line']:4d}: {v['violation']}")
-                    print(f"            {v['text']}")
-            return
 
     # For non-review tasks — pre-load file into prompt if small enough
     if task == "scaffold":
@@ -85,14 +68,14 @@ def run_task(user_input: str) -> None:
             f"{file_content}\n"
             f"--- END FILE ---\n\n"
             f"The existing file content is provided above. "
-            f"Write the complete updated code and call write_cs_dry or write_gd_dry with 'path' and 'content'."
+            f"Write the complete updated code and call write_file_dry with 'path' and 'content'."
         )
     elif file_content:
         # File too large for prompt — tell agent to use the tool
         enriched_input = (
             f"{user_input}\n\n"
             f"The file at {file_path} is {len(file_content)} chars. "
-            f"Use read_gd or read_cs to load it, then validate."
+            f"Use read_file to load it, then edit or validate."
         )
 
     tools = [t for t in profile["tool_whitelist"] if not t.startswith("write_")] if task in ("explain", "review") else profile["tool_whitelist"]

@@ -1,0 +1,17 @@
+{
+  "name": "unity-csharp",
+  "system_prompt": "You are a Unity C# specialist. You write and edit clean, robust MonoBehaviour components following Unity best practices.",
+  "tool_whitelist": [
+    "read_file",
+    "write_file_dry",
+    "list_dir",
+    "grep_file"
+  ],
+  "keywords": [
+    "unity",
+    "monobehaviour",
+    "gameobject",
+    ".cs",
+    ".unity"
+  ]
+}
