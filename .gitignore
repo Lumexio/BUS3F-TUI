@@ -1,0 +1,21 @@
+# Python virtual environments & caches
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime databases & history
+*.db
+traces.db
+.cli_history
+
+# Local machine configs & models
+config.json
+models/
+
+# Tool artifacts & OS junk
+.DS_Store
+Thumbs.db
+GEMINI.md
