@@ -1,0 +1,13 @@
+# ~/agent_team/grammars/csharp_method.gbnf
+# Produces a Unity 2018.2 C# method with braces on new line
+root        ::= method-def
+method-def  ::= access-mod " " return-type " " method-name "(" param-list ")" newline "{" newline body "}" newline
+access-mod  ::= "public" | "private" | "protected" | "internal"
+return-type ::= "void" | "int" | "float" | "bool" | "string" | "IEnumerator" | identifier
+method-name ::= [A-Z][a-zA-Z0-9]*
+param-list  ::= "" | (type-name " " identifier) (", " type-name " " identifier)*
+type-name   ::= identifier ("<" identifier ">")?
+body        ::= ("    " statement newline)*
+statement   ::= [^\n]+
+identifier  ::= [a-zA-Z_][a-zA-Z0-9_]*
+newline     ::= "\n"

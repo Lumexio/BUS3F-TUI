@@ -1,0 +1,6 @@
+# ~/agent_team/grammars/scene_suggestion.gbnf
+root        ::= node
+node        ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"type\"" ws ":" ws string ws ("," ws "\"children\"" ws ":" ws "[" ws node-list ws "]" ws)? "}"
+node-list   ::= node (ws "," ws node)*
+string      ::= "\"" [^"]* "\""
+ws          ::= [ \t\n]*

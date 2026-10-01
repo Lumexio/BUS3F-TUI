@@ -1,0 +1,10 @@
+# ~/agent_team/grammars/gdscript_func.gbnf
+# Produces a valid Godot 3.5 function with tab indentation
+root        ::= func-def
+func-def    ::= "func " identifier "(" param-list "):" newline body
+param-list  ::= "" | identifier (", " identifier)*
+body        ::= (tab statement newline)+
+statement   ::= [^\n]+
+identifier  ::= [a-z_][a-zA-Z0-9_]*
+tab         ::= "\t"
+newline     ::= "\n"
