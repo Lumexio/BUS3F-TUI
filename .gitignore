@@ -15,8 +15,11 @@ traces.db
 config.json
 models/
 
+# Logs & runtime artifacts
+logs/
+*.log
+
 # Tool artifacts & OS junk
 .DS_Store
 Thumbs.db
 GEMINI.md
-#AGENTS.md
